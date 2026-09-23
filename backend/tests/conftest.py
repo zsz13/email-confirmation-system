@@ -3,7 +3,7 @@
 The suite never contacts MySQL or Mailjet: the application is built on a throw-away SQLite
 file per test and the email service is swapped out through a FastAPI dependency override.
 The rate limiter is the real one with the default limits, so a single test may make at most
-five accepted POSTs from one client address (the ``client`` fixture) before it sees a 429.
+three accepted POSTs from one client address (the ``client`` fixture) before it sees a 429.
 """
 
 import os

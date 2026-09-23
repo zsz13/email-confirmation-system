@@ -5,14 +5,19 @@ import asyncio
 import httpx
 import pytest
 from fastapi import FastAPI
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.v1.routes.submissions import rate_limited_detail
+from app.core.config import Settings
+from app.main import create_app
+from app.models.submission import EmailStatus, Submission
 from app.services.rate_limit import RateLimit, SubmissionRateLimiter, normalize_email
 from tests.conftest import RECIPIENT, VALID_PAYLOAD, FakeEmailService, count_submissions
 
-IP_LIMIT = 5
-EMAIL_LIMIT = 3
+# The defaults (test_config pins them); the API tests below run with the default settings.
+IP_LIMIT = 3  # per 60 s
+EMAIL_LIMIT = 3  # per 600 s
 
 
 class FakeClock:
@@ -37,7 +42,7 @@ def limiter(clock: FakeClock) -> SubmissionRateLimiter:
     )
 
 
-def test_ip_limit_blocks_the_sixth_request_and_reports_the_wait(
+def test_ip_limit_blocks_the_fourth_request_and_reports_the_wait(
     limiter: SubmissionRateLimiter, clock: FakeClock
 ) -> None:
     for index in range(IP_LIMIT):
@@ -73,10 +78,10 @@ def test_window_slides_rather_than_resets(
     for index in range(IP_LIMIT - 1):
         limiter.try_acquire(client_ip="10.0.0.1", email=f"u{index}@example.com")
 
-    # The first request has now left the 60s window, the other four have not.
+    # The first request has now left the 60s window, the others have not.
     clock.now += 21
     assert limiter.try_acquire(client_ip="10.0.0.1", email="a@example.com") is None
-    # The four requests from t+40 are now the oldest in the window: 60 - 21 = 39s left.
+    # The requests from t+40 are now the oldest in the window: 60 - 21 = 39s left.
     assert limiter.try_acquire(client_ip="10.0.0.1", email="b@example.com") == 39
 
 
@@ -96,6 +101,8 @@ def test_email_limit_applies_across_clients_and_ignores_domain_case_and_whitespa
     "spelling",
     [
         "johnsmith@gmail.com",
+        "john.smith+one@gmail.com",
+        "johnsmith+two@gmail.com",
         "John.Smith+demo@gmail.com",
         "JOHNSMITH@GMAIL.COM",
         "j.o.h.n.s.m.i.t.h@gmail.com",
@@ -180,7 +187,7 @@ def client_from(app: FastAPI, ip: str) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=transport, base_url="http://testserver")
 
 
-async def test_api_returns_429_with_retry_after_once_the_ip_limit_is_reached(
+async def test_api_allows_three_requests_per_ip_and_rejects_the_fourth_with_retry_after(
     client: httpx.AsyncClient,
     fake_email_service: FakeEmailService,
     session_factory: async_sessionmaker[AsyncSession],
@@ -237,29 +244,25 @@ async def test_api_limits_one_destination_address_across_clients(
 
 
 async def test_api_counts_gmail_aliases_as_one_mailbox(
-    client: httpx.AsyncClient,
+    app: FastAPI,
     fake_email_service: FakeEmailService,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    async def post(index: int, email: str) -> httpx.Response:
+        # A different client address per request: only the mailbox window is shared.
+        async with client_from(app, f"10.4.0.{index}") as client:
+            return await client.post(
+                "/api/v1/submissions", json={"name": "John", "email": email}
+            )
+
     aliases = ["John.Smith+demo@gmail.com", "johnsmith@gmail.com", "j.smith@gmail.com"]
     # The first two are one Gmail mailbox; the third is a different one.
-    for alias in aliases[:2]:
-        response = await client.post(
-            "/api/v1/submissions", json={"name": "John", "email": alias}
-        )
-        assert response.status_code == 201
-    response = await client.post(
-        "/api/v1/submissions",
-        json={"name": "John", "email": "JOHNSMITH@googlemail.com"},
-    )
-    assert response.status_code == 201
+    for index, alias in enumerate(aliases[:2]):
+        assert (await post(index, alias)).status_code == 201
+    assert (await post(2, "JOHNSMITH@googlemail.com")).status_code == 201
 
-    rejected = await client.post(
-        "/api/v1/submissions", json={"name": "John", "email": "john.smith@gmail.com"}
-    )
-    other = await client.post(
-        "/api/v1/submissions", json={"name": "John", "email": aliases[2]}
-    )
+    rejected = await post(3, "john.smith@gmail.com")
+    other = await post(4, aliases[2])
 
     assert rejected.status_code == 429
     assert other.status_code == 201
@@ -274,21 +277,20 @@ async def test_api_counts_gmail_aliases_as_one_mailbox(
 
 
 async def test_api_keeps_non_gmail_plus_tags_distinct(
-    client: httpx.AsyncClient, fake_email_service: FakeEmailService
+    app: FastAPI, fake_email_service: FakeEmailService
 ) -> None:
-    for _ in range(EMAIL_LIMIT):
-        response = await client.post(
-            "/api/v1/submissions",
-            json={"name": "Daniyar", "email": "user+one@example.com"},
-        )
-        assert response.status_code == 201
+    async def post(index: int, email: str) -> httpx.Response:
+        # A different client address per request: only the mailbox window is shared.
+        async with client_from(app, f"10.5.0.{index}") as client:
+            return await client.post(
+                "/api/v1/submissions", json={"name": "Daniyar", "email": email}
+            )
 
-    rejected = await client.post(
-        "/api/v1/submissions", json={"name": "Daniyar", "email": "user+one@example.com"}
-    )
-    other = await client.post(
-        "/api/v1/submissions", json={"name": "Daniyar", "email": "user+two@example.com"}
-    )
+    for index in range(EMAIL_LIMIT):
+        assert (await post(index, "user+one@example.com")).status_code == 201
+
+    rejected = await post(EMAIL_LIMIT, "user+one@example.com")
+    other = await post(EMAIL_LIMIT + 1, "user+two@example.com")
 
     assert rejected.status_code == 429
     assert other.status_code == 201
@@ -314,7 +316,10 @@ async def test_rate_limit_error_is_readable_cross_origin(
     assert "Retry-After" in response.headers["access-control-expose-headers"]
 
 
-async def test_concurrent_requests_cannot_exceed_the_limit(
+CONCURRENT_REQUESTS = 12
+
+
+async def test_concurrent_requests_from_one_ip_cannot_exceed_the_limit(
     client: httpx.AsyncClient,
     fake_email_service: FakeEmailService,
     session_factory: async_sessionmaker[AsyncSession],
@@ -325,12 +330,12 @@ async def test_concurrent_requests_cannot_exceed_the_limit(
                 "/api/v1/submissions",
                 json={"name": "Daniyar", "email": f"u{index}@example.com"},
             )
-            for index in range(IP_LIMIT + 7)
+            for index in range(CONCURRENT_REQUESTS)
         )
     )
 
     statuses = sorted(response.status_code for response in responses)
-    assert statuses == [201] * IP_LIMIT + [429] * 7
+    assert statuses == [201] * IP_LIMIT + [429] * (CONCURRENT_REQUESTS - IP_LIMIT)
     assert len(fake_email_service.sent) == IP_LIMIT
     assert await count_submissions(session_factory) == IP_LIMIT
 
@@ -365,6 +370,82 @@ async def test_concurrent_aliases_of_one_mailbox_cannot_exceed_its_limit(
     assert statuses == [201] * EMAIL_LIMIT + [429] * (len(spellings) - EMAIL_LIMIT)
     assert len(fake_email_service.sent) == EMAIL_LIMIT
     assert await count_submissions(session_factory) == EMAIL_LIMIT
+
+
+IN_PROGRESS = [
+    EmailStatus.PENDING,
+    EmailStatus.ACCEPTED,
+    EmailStatus.QUEUED,
+    EmailStatus.RETRYING,
+]
+
+
+@pytest.mark.parametrize("status", IN_PROGRESS)
+@pytest.mark.parametrize("shared_key", ["client_ip", "mailbox"])
+async def test_earlier_submissions_count_whatever_their_delivery_status(
+    app: FastAPI,
+    fake_email_service: FakeEmailService,
+    session_factory: async_sessionmaker[AsyncSession],
+    status: EmailStatus,
+    shared_key: str,
+) -> None:
+    # A request counts when it is let through; the limiter never waits for, or looks at,
+    # the delivery outcome stored in the database.
+    limit = IP_LIMIT if shared_key == "client_ip" else EMAIL_LIMIT
+
+    async def post(index: int) -> httpx.Response:
+        if shared_key == "client_ip":
+            ip, email = "10.3.0.1", f"u{index}@example.com"
+        else:
+            ip, email = f"10.3.1.{index}", "same@example.com"
+        async with client_from(app, ip) as client:
+            return await client.post(
+                "/api/v1/submissions", json={"name": "Daniyar", "email": email}
+            )
+
+    for index in range(limit):
+        assert (await post(index)).status_code == 201
+    async with session_factory() as session:
+        await session.execute(update(Submission).values(email_status=status))
+        await session.commit()
+
+    rejected = await post(limit)
+
+    assert rejected.status_code == 429
+    assert "Retry-After" in rejected.headers
+    assert len(fake_email_service.sent) == limit
+    assert await count_submissions(session_factory) == limit
+
+
+async def test_windows_are_shared_by_requests_and_start_empty_after_a_restart(
+    app: FastAPI, settings: Settings
+) -> None:
+    # One limiter per application, built with it: every request of this process counts
+    # against the same windows...
+    async with client_from(app, "10.6.0.1") as client:
+        for index in range(IP_LIMIT):
+            response = await client.post(
+                "/api/v1/submissions",
+                json={"name": "Daniyar", "email": f"u{index}@example.com"},
+            )
+            assert response.status_code == 201
+        response = await client.post(
+            "/api/v1/submissions", json={"name": "Daniyar", "email": "late@example.com"}
+        )
+        assert response.status_code == 429
+
+    # ...and a restarted process builds a new application whose windows start empty.
+    restarted = create_app(settings)
+    try:
+        assert restarted.state.rate_limiter is not app.state.rate_limiter
+        assert (
+            restarted.state.rate_limiter.try_acquire(
+                client_ip="10.6.0.1", email="late@example.com"
+            )
+            is None
+        )
+    finally:
+        await restarted.state.engine.dispose()
 
 
 async def test_health_is_not_rate_limited(client: httpx.AsyncClient) -> None:

@@ -75,6 +75,6 @@ export const TERMINAL_DELIVERY_STATUSES: ReadonlySet<DeliveryStatus> = new Set([
 ]);
 
 /** How often the page reads the stored status while delivery is in progress. */
-export const STATUS_POLL_INTERVAL_MS = 5_000;
+export const STATUS_POLL_INTERVAL_MS = 3_000;
 /** How long the page keeps polling on its own; the backend keeps reconciling after that. */
 export const STATUS_POLL_WINDOW_MS = 120_000;

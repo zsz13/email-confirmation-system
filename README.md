@@ -60,14 +60,16 @@ Browser ──▶ frontend: NGINX (127.0.0.1:4200 → :8080)
                                                      └─ DeliveryReconciler ──▶ Mailjet message API (GET)
 ```
 
-1. `POST /api/v1/submissions`: validate → rate limit → insert `pending` and commit → send through
-   Mailjet → store `accepted` with the Mailjet MessageID → `201`. If Mailjet refuses or cannot be
-   reached, the row becomes `failed` and the API answers `502`.
+1. `POST /api/v1/submissions`: validate → rate limit (3 requests per 60 seconds per client IP and
+   3 per 600 seconds per normalised mailbox, on by default) → insert `pending` and commit → send
+   through Mailjet → store `accepted` with the Mailjet MessageID → `201`. If Mailjet refuses or
+   cannot be reached, the row becomes `failed` and the API answers `502`.
 2. The **DeliveryReconciler**, an asyncio task started with the application, looks up the
-   unfinished rows (`accepted`, `queued`, `retrying`, with a stored MessageID) in Mailjet every 5
-   seconds and stores each change.
-3. The page polls `GET /api/v1/submissions/{tracking_id}/status` every 5 seconds until a final
-   state (for at most 2 minutes), and a button checks on demand. That endpoint only reads MySQL.
+   unfinished rows (`accepted`, `queued`, `retrying`, with a stored MessageID) in Mailjet every 3
+   seconds and stores each change. With no unfinished rows it makes no Mailjet request at all.
+3. The page polls `GET /api/v1/submissions/{tracking_id}/status` every 3 seconds until a final
+   state (for at most 2 minutes), and a button checks on demand. That endpoint only reads MySQL,
+   so the page's polling adds no Mailjet traffic: the reconciler alone polls Mailjet.
 
 Request flow, design decisions, logging and Docker topology: [docs/architecture.md](docs/architecture.md).
 

@@ -39,12 +39,19 @@ services:
       MAILJET_SECRET_KEY: integration-stub-secret
       MAILJET_SENDER_EMAIL: sender@example.com
       MAILJET_SENDER_NAME: Integration Test
-      # Poll the stub every second, so the background status updates show up quickly.
-      DELIVERY_RECONCILE_INTERVAL_SECONDS: "1"
+      # The documented default, pinned so backend/.env cannot change it: the script measures
+      # this cadence and checks that the stub hears nothing once every row is final.
+      DELIVERY_RECONCILE_INTERVAL_SECONDS: "3"
       # The script logs in with the demo account; a developer's own override must not
       # change what this run sees.
       ADMIN_USERNAME: demo-admin
       ADMIN_PASSWORD: demo-admin-2026
+      # The submission limits the script's checks count on: the documented defaults
+      # (tests/test_config.py pins them in the code), whatever backend/.env overrides.
+      RATE_LIMIT_IP_MAX_REQUESTS: "3"
+      RATE_LIMIT_IP_WINDOW_SECONDS: "60"
+      RATE_LIMIT_EMAIL_MAX_REQUESTS: "3"
+      RATE_LIMIT_EMAIL_WINDOW_SECONDS: "600"
     depends_on:
       mailjet-stub:
         condition: service_healthy

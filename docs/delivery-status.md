@@ -67,7 +67,7 @@ not have. The `DeliveryReconciler` (`backend/app/services/delivery_reconciler.py
 
 - It is an asyncio task that the FastAPI lifespan starts with the application and cancels
   cleanly at shutdown, mid-lookup if need be.
-- Every `DELIVERY_RECONCILE_INTERVAL_SECONDS` (default 5, at least 1) it selects the unfinished
+- Every `DELIVERY_RECONCILE_INTERVAL_SECONDS` (default 3, at least 1) it selects the unfinished
   rows: `accepted`, `queued` or `retrying`, with a stored MessageID, newest first, at most 100. It
   looks each one up with `GET /v3/REST/message/{MessageID}`, one after another, and stores every
   change. The MessageID comes from the Send API's reply; if an accepted reply ever lacked one, that
@@ -112,17 +112,25 @@ It prints each change and ends with `RESULT: <STATE>`:
 2. The API answers `201` with a message and the row's UUIDv7 as `tracking_id`.
 3. The page shows "Accepted for delivery" and the address it sent, from its own form state.
 4. Independently, the backend's reconciler moves the row on as Mailjet reports.
-5. The page polls `GET /api/v1/submissions/{tracking_id}/status` every 5 seconds, one request at a
-   time.
+5. The page polls `GET /api/v1/submissions/{tracking_id}/status` every 3 seconds, one request at a
+   time: the first read is due 3 seconds after the `201`, and each next one 3 seconds after the
+   previous answer.
 6. Automatic polling stops at a final state, or after 2 minutes with a note that delivery is still
    being processed.
 7. A **Check delivery status** button reads the status once at any time, also after polling
    stopped. A failed read shows an error and keeps the last known state.
 
-The status endpoint reads MySQL only and never calls Mailjet, so pressing the button cannot turn
-into provider traffic. It returns `{"status": "<state>"}` and nothing else (no name, address,
+The status endpoint reads MySQL only and never calls Mailjet, so neither the 3-second polling nor
+the button can turn into provider traffic. Mailjet is polled only by the reconciler, on its own
+interval (`DELIVERY_RECONCILE_INTERVAL_SECONDS`, 3 seconds by default), whether or not a page is
+watching. The endpoint returns `{"status": "<state>"}` and nothing else (no name, address,
 timestamp or provider data), sent with `Cache-Control: no-store`. Its privacy and rate limit are
 described in [security.md](security.md#public-api-data-and-tracking-ids).
+
+The two 3-second defaults are deliberate: a state Mailjet reports is usually on screen within about
+6 seconds. They remain separate settings, `DELIVERY_RECONCILE_INTERVAL_SECONDS` in `backend/.env`
+for the backend and `STATUS_POLL_INTERVAL_MS` in
+`frontend/src/app/features/submission/delivery-status.ts` for the page.
 
 What the page says (`frontend/src/app/features/submission/delivery-status.ts`):
 

@@ -4,6 +4,7 @@ Mailjet is never contacted: status lookups go through ``httpx.MockTransport``.
 """
 
 import asyncio
+import itertools
 import logging
 import time
 import types
@@ -74,7 +75,7 @@ async def reconciler_for(
     settings: Settings,
     session_factory: async_sessionmaker[AsyncSession],
     mailjet: FakeMailjet,
-    interval_seconds: float = 5.0,
+    interval_seconds: float = 3.0,
 ) -> AsyncGenerator[DeliveryReconciler]:
     async with httpx.AsyncClient(transport=mailjet.transport) as client:
         reconciler = DeliveryReconciler(
@@ -365,6 +366,52 @@ async def test_a_database_outage_does_not_stop_the_worker(
 # --- running it --------------------------------------------------------------------------
 
 
+async def test_the_worker_looks_an_unfinished_row_up_once_per_interval(
+    settings: Settings, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    await stored(session_factory)
+    looked_up_at: list[float] = []
+
+    async def nothing_to_report_yet() -> httpx.Response:
+        looked_up_at.append(time.monotonic())
+        return httpx.Response(404, json={"ErrorMessage": "Object not found"})
+
+    mailjet = FakeMailjet({MESSAGE_ID: nothing_to_report_yet})
+    interval = 1.0
+
+    async def three_lookups() -> bool:
+        return len(looked_up_at) >= 3
+
+    async with reconciler_for(
+        settings, session_factory, mailjet, interval_seconds=interval
+    ) as reconciler:
+        reconciler.start()
+        await eventually(three_lookups)
+
+    # One cycle per interval, counted from the end of the previous cycle: never sooner,
+    # and no cycle skipped.
+    gaps = [later - earlier for earlier, later in itertools.pairwise(looked_up_at)]
+    assert all(interval - 0.01 <= gap < 2 * interval - 0.1 for gap in gaps[:2]), gaps
+
+
+@pytest.mark.parametrize("interval", [3, 7])
+async def test_the_application_starts_the_worker_with_the_configured_interval(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    interval: int,
+) -> None:
+    # 3 is the default (test_config pins it); 7 shows the setting, not a constant, is used.
+    settings = settings.model_copy(
+        update={"delivery_reconcile_interval_seconds": interval}
+    )
+    with caplog.at_level(logging.INFO, logger="app"):
+        async with running_app(settings, FakeMailjet(), monkeypatch):
+            pass
+
+    assert f"delivery reconciler started interval_s={interval} " in caplog.text
+
+
 async def test_cycles_never_overlap(
     settings: Settings, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
@@ -478,7 +525,7 @@ async def test_a_restarted_backend_resumes_an_unfinished_row(
         async def delivered() -> bool:
             return await status_in_db(sessions, submission.id) is EmailStatus.DELIVERED
 
-        # The first cycle runs at startup, not one interval (5 s) later.
+        # The first cycle runs at startup, not one interval (3 s) later.
         await eventually(delivered, within_seconds=2)
         assert application.state.delivery_reconciler.running
 
