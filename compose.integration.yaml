@@ -1,0 +1,50 @@
+# Overrides for the automated integration test (scripts/integration-test.sh), layered on top
+# of compose.yaml. The backend is pointed at a stub of the Mailjet Send API running in the
+# same Compose network, so the test exercises the real images, real MySQL and real migrations
+# without sending any email or using any credential.
+
+services:
+  mailjet-stub:
+    image: python:3.14-slim-trixie
+    command: ["python", "/opt/mailjet_stub.py"]
+    volumes:
+      - ./scripts/mailjet_stub.py:/opt/mailjet_stub.py:ro
+    user: "65534:65534"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    ports:
+      # Loopback only: lets the test script read GET /messages.
+      - "127.0.0.1:${MAILJET_STUB_PORT:-8025}:8025"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8025/health', timeout=2)",
+        ]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  backend:
+    environment:
+      # Overrides whatever backend/.env holds, so real credentials are never used here.
+      MAILJET_SEND_URL: http://mailjet-stub:8025/v3.1/send
+      MAILJET_MESSAGE_URL: http://mailjet-stub:8025/v3/REST/message
+      MAILJET_API_KEY: integration-stub-key
+      MAILJET_SECRET_KEY: integration-stub-secret
+      MAILJET_SENDER_EMAIL: sender@example.com
+      MAILJET_SENDER_NAME: Integration Test
+      # Poll the stub every second, so the background status updates show up quickly.
+      DELIVERY_RECONCILE_INTERVAL_SECONDS: "1"
+      # The script logs in with the demo account; a developer's own override must not
+      # change what this run sees.
+      ADMIN_USERNAME: demo-admin
+      ADMIN_PASSWORD: demo-admin-2026
+    depends_on:
+      mailjet-stub:
+        condition: service_healthy

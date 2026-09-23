@@ -1,0 +1,34 @@
+{% extends "sqladmin/layout.html" %}
+{% block content_header %}
+<div class="row align-items-center">
+  <div class="col">
+    <div class="page-pretitle">Overview</div>
+    <h2 class="page-title">Submissions</h2>
+  </div>
+</div>
+{% endblock %}
+{% block content %}
+{% for label, value in cards.items() %}
+<div class="col-6 col-md-4 col-xl">
+  <div class="card">
+    <div class="card-body">
+      <div class="subheader">{{ label }}</div>
+      <div class="h1 mb-0">{{ value }}</div>
+    </div>
+  </div>
+</div>
+{% endfor %}
+<div class="col-12">
+  <div class="card">
+    <div class="card-body">
+      <p class="mb-2">
+        This panel is <strong>read-only</strong>: submissions can be listed, searched, filtered,
+        sorted and opened, but not created, edited, deleted or exported.
+      </p>
+      <a class="btn btn-primary" href="{{ url_for('admin:list', identity='submission') }}">
+        Open the submissions table
+      </a>
+    </div>
+  </div>
+</div>
+{% endblock %}

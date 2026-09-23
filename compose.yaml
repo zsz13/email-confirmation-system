@@ -1,0 +1,106 @@
+# The whole application: `docker compose up --build`, then open http://localhost:4200.
+#
+# Start-up order: mysql (healthy) -> migrate (exits 0) -> backend (healthy) -> frontend.
+# Mailjet credentials come from backend/.env at run time only; no image contains them.
+# The MySQL credentials come from the repository-root .env (ignored by Git, created with
+# `cp .env.example .env`). They are required, so no credential is written in this file and
+# the two places that need them cannot drift apart.
+
+x-hardened: &hardened
+  security_opt:
+    - no-new-privileges:true
+
+# migrate and backend run the same image, so the schema and the code can never drift apart.
+x-backend-image: &backend-image
+  build: ./backend
+  image: email-confirmation-backend
+
+# One definition for the application's database URL, so the two services that talk to MySQL
+# can never disagree with each other or with the credentials the mysql service is created with.
+# The URL is assembled by substitution, so the password must be URL-safe; .env.example
+# says so next to the value.
+x-database-url: &database-url
+  DATABASE_URL: mysql+asyncmy://${MYSQL_USER:?copy .env.example to .env}:${MYSQL_PASSWORD:?copy .env.example to .env}@mysql:3306/${MYSQL_DATABASE:?copy .env.example to .env}
+
+services:
+  mysql:
+    <<: *hardened
+    image: mysql:8.4
+    environment:
+      # Explicit credentials, never generated: MYSQL_RANDOM_ROOT_PASSWORD makes the image
+      # print "GENERATED ROOT PASSWORD: ..." into the container log, where `docker compose
+      # logs mysql` shows it to anyone who can read the log. Root is used by the image's own
+      # bootstrap only; the application and the migrations connect as MYSQL_USER.
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?copy .env.example to .env}
+      # Root only exists for connections from inside the container, so the account the
+      # bootstrap needs cannot be used over the published port.
+      MYSQL_ROOT_HOST: localhost
+      MYSQL_DATABASE: ${MYSQL_DATABASE:?copy .env.example to .env}
+      MYSQL_USER: ${MYSQL_USER:?copy .env.example to .env}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?copy .env.example to .env}
+    ports:
+      # Loopback only, and only so the local uv workflow can reach the database.
+      - "127.0.0.1:${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      # 127.0.0.1 forces TCP so the check only passes once the real server (not the
+      # bootstrap-only socket server) accepts connections.
+      test:
+        [
+          "CMD-SHELL",
+          "mysqladmin ping -h 127.0.0.1 -u\"$$MYSQL_USER\" -p\"$$MYSQL_PASSWORD\" --silent",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      # A cold first start initialises the data directory, which can take a while on a slow
+      # or busy machine; failures during this period do not count against the retries.
+      start_period: 60s
+
+  migrate:
+    <<: [*hardened, *backend-image]
+    command: ["alembic", "upgrade", "head"]
+    # Migrations need only the database; Mailjet settings are not passed on purpose.
+    environment: *database-url
+    cap_drop:
+      - ALL
+    healthcheck:
+      disable: true
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  backend:
+    <<: [*hardened, *backend-image]
+    env_file:
+      - backend/.env
+    environment:
+      # Inside the Compose network the database is reached by service name, not 127.0.0.1.
+      <<: *database-url
+      # Trust X-Forwarded-For from any peer: the only peer is the frontend's NGINX, which
+      # overwrites the header with the real client address. This is safe exactly because the
+      # port below is exposed to the Compose network only. Never publish it with `ports:`.
+      FORWARDED_ALLOW_IPS: "*"
+    cap_drop:
+      - ALL
+    expose:
+      - "8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  frontend:
+    <<: *hardened
+    build: ./frontend
+    image: email-confirmation-frontend
+    ports:
+      - "127.0.0.1:${FRONTEND_PORT:-4200}:8080"
+    cap_drop:
+      - ALL
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  mysql_data:

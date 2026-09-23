@@ -1,0 +1,148 @@
+@let current = state();
+
+<section class="card" [attr.aria-busy]="submitting()">
+  @if (current.status === 'success') {
+    <div class="receipt">
+      <div class="receipt-badge" aria-hidden="true">
+        <svg viewBox="0 0 24 24" focusable="false">
+          <path
+            d="M5 12.5l4.5 4.5L19 7.5"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.4"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
+      </div>
+      <h1 class="receipt-title">Confirmation accepted for delivery</h1>
+      <p class="receipt-text">
+        Your confirmation email has been accepted by the email provider. Delivery may take a moment.
+      </p>
+      <p class="receipt-text">Recipient:</p>
+      <p class="receipt-address">{{ current.email }}</p>
+
+      @let view = deliveryView();
+      <section class="delivery" aria-labelledby="delivery-heading">
+        <div class="delivery-header">
+          <h2 id="delivery-heading" class="delivery-heading">Delivery status</h2>
+          <span class="delivery-badge" [attr.data-tone]="view.tone">
+            <span
+              class="delivery-dot"
+              [class.delivery-dot-live]="!deliveryFinal()"
+              aria-hidden="true"
+            ></span>
+            {{ view.label }}
+          </span>
+        </div>
+        <p class="delivery-description">{{ view.description }}</p>
+
+        @if (autoPolling()) {
+          <p class="delivery-hint">
+            Checking automatically every {{ pollIntervalSeconds }} seconds.
+          </p>
+        } @else if (!deliveryFinal()) {
+          <p class="delivery-hint">
+            Delivery is still being processed. Automatic checks have stopped; use the button below
+            to see the latest status.
+          </p>
+        }
+
+        @if (statusError(); as message) {
+          <div class="alert" role="alert">
+            <p class="alert-title">Couldn’t check the delivery status</p>
+            <p class="alert-text">{{ message }}</p>
+          </div>
+        }
+
+        <div class="delivery-actions">
+          <button
+            type="button"
+            class="button button-secondary"
+            data-action="check-status"
+            [disabled]="checking()"
+            (click)="checkStatus()"
+          >
+            @if (checking()) {
+              <span class="spinner" aria-hidden="true"></span>
+              Checking…
+            } @else {
+              Check delivery status
+            }
+          </button>
+          @if (lastChecked(); as checkedAt) {
+            <p class="delivery-checked">Last checked at {{ checkedAt | date: 'mediumTime' }}</p>
+          }
+        </div>
+      </section>
+
+      <p class="notice">{{ spamNotice }}</p>
+      <button
+        type="button"
+        class="button button-secondary"
+        data-action="start-over"
+        (click)="startOver()"
+      >
+        Send another confirmation
+      </button>
+    </div>
+  } @else {
+    <form class="form" [formGroup]="form" (ngSubmit)="submit()" novalidate>
+      <div class="field">
+        <label class="label" for="name">Name</label>
+        <input
+          id="name"
+          class="input"
+          type="text"
+          formControlName="name"
+          autocomplete="name"
+          placeholder="Your name"
+          [attr.aria-invalid]="showError('name')"
+          [attr.aria-describedby]="showError('name') ? 'name-error' : null"
+        />
+        @if (showError('name')) {
+          <p id="name-error" class="field-error">{{ nameError() }}</p>
+        }
+      </div>
+
+      <div class="field">
+        <label class="label" for="email">Email address</label>
+        <input
+          id="email"
+          class="input"
+          type="email"
+          formControlName="email"
+          autocomplete="email"
+          inputmode="email"
+          spellcheck="false"
+          placeholder="name@example.com"
+          [attr.aria-invalid]="showError('email')"
+          [attr.aria-describedby]="showError('email') ? 'email-error' : 'email-hint'"
+        />
+        @if (showError('email')) {
+          <p id="email-error" class="field-error">{{ emailError() }}</p>
+        } @else {
+          <p id="email-hint" class="field-hint">The confirmation is sent to this exact address.</p>
+        }
+      </div>
+
+      @if (current.status === 'error') {
+        <div class="alert" role="alert">
+          <p class="alert-title">{{ current.title }}</p>
+          <p class="alert-text">{{ current.message }}</p>
+        </div>
+      }
+
+      <button type="submit" class="button" [disabled]="submitting()">
+        @if (submitting()) {
+          <span class="spinner" aria-hidden="true"></span>
+          Sending…
+        } @else {
+          Send confirmation
+        }
+      </button>
+    </form>
+  }
+
+  <p class="sr-only" aria-live="polite">{{ announcement() }}</p>
+</section>

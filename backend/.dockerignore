@@ -1,0 +1,14 @@
+# Secrets are supplied at runtime through Docker Compose, never copied into the image.
+.env
+.env.*
+
+.venv/
+# `**/`: a bare pattern only matches at the top of the build context, and the bytecode
+# caches sit next to the sources in app/.
+**/__pycache__/
+**/*.py[cod]
+.pytest_cache/
+.ruff_cache/
+tests/
+Dockerfile
+.dockerignore
