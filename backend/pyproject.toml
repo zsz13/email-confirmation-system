@@ -1,0 +1,82 @@
+[project]
+name = "email-confirmation-backend"
+version = "0.1.0"
+description = "FastAPI service that stores a name/email submission in MySQL and sends a confirmation email through Mailjet."
+requires-python = ">=3.14"
+dependencies = [
+    "alembic>=1.20.0",
+    "asyncmy>=0.2.15",
+    "fastapi>=0.141.1",
+    "httpx>=0.28.1",
+    "pydantic-settings>=2.15.0",
+    "pydantic[email]>=2.13.5",
+    "sqladmin[auth]>=0.32.0",
+    "sqlalchemy[asyncio]>=2.0.54",
+    "uvicorn[standard]>=0.53.0",
+]
+
+[dependency-groups]
+dev = [
+    "aiosqlite>=0.22.1",
+    "pyright>=1.1.414",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.16.8",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py314"
+
+[tool.ruff.lint]
+select = [
+  "E", "W", "F",      # pycodestyle, pyflakes
+  "I",                # isort
+  "UP",               # pyupgrade
+  "B",                # bugbear
+  "C4", "SIM", "PIE", # comprehensions, simplify, misc anti-patterns
+  "RET", "RSE", "TRY",# returns, raises, exception handling
+  "ASYNC",            # async correctness
+  "S",                # bandit security checks
+  "DTZ",              # timezone-aware datetime usage
+  "LOG", "G",         # logging usage and format
+  "T20",              # no print statements
+  "N",                # naming
+  "PERF", "FURB",     # performance, modernization
+  "PTH",              # pathlib
+  "ARG", "PL",        # unused arguments, selected pylint
+  "RUF", "TID",       # ruff-specific, tidy imports
+  "ANN",              # annotations
+]
+ignore = [
+  "E501",             # the formatter owns line length
+  "COM812", "ISC001", # conflict with the formatter
+  "PLR0913", "PLR2004",
+  "TRY003", "EM101", "EM102",
+  "ANN401",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# SQLAdmin's ModelView is configured through declarative class attributes (ClassVar in the base).
+"app/admin/views.py" = ["RUF012"]
+"tests/**" = ["S101", "S105", "S106", "ANN", "ARG", "PLR2004", "DTZ001"]  # naive datetimes are deliberate test inputs
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+# The local alembic/ directory would otherwise make Ruff treat the alembic package as first-party.
+known-third-party = ["alembic"]
+
+[tool.pyright]
+pythonVersion = "3.14"
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "standard"
+reportMissingTypeStubs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q -ra --tb=short"
+xfail_strict = true
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

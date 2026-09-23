@@ -1,0 +1,45 @@
+# Weekly dependency updates for the ecosystems this repository actually uses.
+# Minor and patch updates are grouped into one pull request per ecosystem to keep the
+# queue short; major updates arrive individually because they usually need attention.
+version: 2
+updates:
+  - package-ecosystem: npm # pnpm lockfile in frontend/
+    directory: /frontend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      angular:
+        patterns:
+          - "@angular/*"
+          - angular-eslint
+          - "@angular-eslint/*"
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: docker # base images in the Dockerfiles
+    directories:
+      - /backend
+      - /frontend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+
+  - package-ecosystem: docker-compose # the mysql image in compose.yaml
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      actions:
+        update-types:
+          - minor
+          - patch

@@ -1,0 +1,24 @@
+# Environment files hold real credentials and must never be committed.
+.env
+.env.*
+!.env.example
+backend/.env
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+
+# Node / Angular
+node_modules/
+dist/
+coverage/
+.angular/
+*.log
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
