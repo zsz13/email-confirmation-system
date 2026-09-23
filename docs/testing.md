@@ -80,8 +80,8 @@ and none needs real credentials.
 | Status API | only `{"status"}`, `no-store`, one `404` for malformed, non-v7 and unknown ids, its own rate limit, no Mailjet traffic |
 | Mailjet | the exact Send API request, auth failures, per-message errors, malformed bodies, network errors; message lookups (`404`, `429`, `5xx`, refusals, unreadable replies) |
 | Delivery states | every Mailjet status and webhook event, the transition rules, the conditional update against a stale copy |
-| Reconciler | selection of in-progress rows, batching, failures that do not stop it, no overlapping cycles, clean shutdown, resume after restart |
-| Rate limiting | sliding windows with a fake clock, `Retry-After`, Gmail aliasing, concurrency (exactly 5 of 12 concurrent requests pass) |
+| Reconciler | the 3 s default, the application running the worker at the configured interval, one cycle per interval, selection of in-progress rows, no lookup for final rows, batching, failures that do not stop it, no overlapping cycles, clean shutdown, resume after restart |
+| Rate limiting | the 3/60 s and 3/600 s defaults, sliding windows with a fake clock, `Retry-After`, Gmail aliasing, concurrency (exactly 3 of 12 concurrent requests from one IP pass), earlier submissions counting while `pending`, `accepted`, `queued` or `retrying`, no row and no Mailjet call on a `429`, windows reset on restart |
 | Admin panel | login, throttling, cookie flags, demo-secret refusal, search (including by UUIDv7), filter, sorting, paging, details, `403` on every write route |
 | Logging | request ids, the `request completed` line, event levels, masking, and that no credential, header, cookie or full address reaches the log |
 | Scripts | the `check_delivery` poller with a fake clock, the E2E recipient check, and that the real-email test refuses to run without its opt-in |
@@ -101,14 +101,21 @@ and checks the running stack from the outside with `curl` and `mysql`:
 1. Health through the NGINX proxy, the Angular page renders, `/docs` serves Swagger UI with a
    policy that lets it load, and `/openapi.json` is proxied.
 2. `201` with exactly `detail` and a UUIDv7 `tracking_id`; `422` for invalid input; the fourth
-   request for one mailbox is `429` with `Retry-After`; the stub received exactly three messages.
+   request for one mailbox is `429` with `Retry-After`. Each limit is then shown on its own: a
+   fresh mailbox from the same client is `429` (IP limit, `Retry-After` at most 60), spoofed
+   `X-Forwarded-For` and `X-Real-IP` headers change nothing, and the first mailbox from a fresh
+   client is `429` (mailbox limit, `Retry-After` above 60). The stub received exactly three
+   messages, and no rejected request stored a row.
 3. `X-Request-ID` is echoed through the proxy and appears in the backend log; a newline in the path
    cannot forge a log line.
 4. MySQL holds the rows in a `BINARY(16)` primary key with version-7 ids, each stored as `accepted`
-   with a MessageID. The reconciler then moves them `accepted → queued → delivered` on its own, and
+   with a MessageID. The reconciler then moves them `accepted → queued → delivered` on its own,
+   one cycle every 3 seconds (measured between one row's two transitions in the backend log), and
    `python -m app.check_delivery` prints `RESULT: DELIVERED`.
 5. The status endpoint reads MySQL (a direct `UPDATE` shows at once), causes no Mailjet lookups,
-   and answers one `404` for malformed and unknown ids; `GET /api/v1/submissions` is `405`.
+   and answers one `404` for malformed and unknown ids; `GET /api/v1/submissions` is `405`. With
+   every row final, at least two reconcile cycles pass without a single Mailjet lookup; a row made
+   unfinished again is then looked up exactly once.
 6. The migrations run down to the integer key and back up on live data; a second upgrade is a
    no-op and `alembic check` is clean. A row left `accepted` while the backend was stopped is
    delivered after the restart.
@@ -132,8 +139,10 @@ containers, network and volume.
 - `GET /messages` lists the accepted recipients for the test to inspect.
 
 The overlay points the backend at the stub with `MAILJET_SEND_URL` and `MAILJET_MESSAGE_URL`,
-replaces the credentials with dummy values and polls every second. No real credential is used and
-no email leaves the machine.
+replaces the credentials with dummy values, and pins the reconcile interval (3 s) and the submission
+rate limits to their documented defaults so a local `backend/.env` cannot change what the checks
+measure. No real
+credential is used and no email leaves the machine.
 
 ## Real Mailjet end-to-end test
 
@@ -171,4 +180,5 @@ reports what MySQL holds.
 
 To see the failure path, put a wrong `MAILJET_SECRET_KEY` in `backend/.env`, run
 `docker compose up -d backend` and submit again: `502`, a `failed` row, and the form keeps its
-values. To see the rate limit, submit four times to one address within ten minutes.
+values. To see the rate limit, submit four times within a minute (the fourth is refused for the
+client) or four times to one address within ten minutes (refused for the mailbox).

@@ -60,14 +60,18 @@ Checked after validation and before anything is stored or sent (`backend/app/ser
 
 | Endpoint | Key | Default | Purpose |
 |----------|-----|---------|---------|
-| `POST /api/v1/submissions` | client IP | 5 per 60 s | one client cannot send mail in bulk or burn the Mailjet quota |
+| `POST /api/v1/submissions` | client IP | 3 per 60 s | one client cannot send mail in bulk or burn the Mailjet quota |
 | `POST /api/v1/submissions` | destination mailbox | 3 per 10 min | one address cannot be flooded, and probing an address costs time |
-| `GET /api/v1/submissions/{tracking_id}/status` | client IP | 60 per 60 s | polling fits comfortably; sweeping candidate tracking ids does not |
+| `GET /api/v1/submissions/{tracking_id}/status` | client IP | 60 per 60 s | the page's polling (every 3 s, 20 a minute) fits comfortably; sweeping candidate tracking ids does not |
 | admin login | client IP, failed attempts only | 5 per 60 s | the shared password cannot be guessed at line speed |
 
 - A rejected request answers `429` with `Retry-After`, and creates no row and no Mailjet call.
   Rejections are not counted, so the wait is accurate. Status reads are counted before the lookup,
-  so a miss costs as much as a hit. The API limits are configurable through `RATE_LIMIT_*`.
+  so a miss costs as much as a hit. The API limits are on by default and configurable through
+  `RATE_LIMIT_*`.
+- **Delivery status plays no part.** A submission counts from the moment it is let through, before
+  its row exists. The limiter never reads the stored status, so earlier submissions that are still
+  `pending`, `accepted`, `queued` or `retrying` use up the budget just like delivered ones.
 - **Mailbox key.** Surrounding whitespace is trimmed and the domain lower-cased. For Gmail
   (`gmail.com` and `googlemail.com`, treated as one domain), dots in the local part are ignored,
   `+tag` suffixes are folded and case is ignored, so `John.Smith+demo@gmail.com` and
@@ -80,8 +84,11 @@ Checked after validation and before anything is stored or sent (`backend/app/ser
   spoof it. Uvicorn trusts the header only because `compose.yaml` sets `FORWARDED_ALLOW_IPS=*` for
   a backend whose port is never published. Locally, every browser arrives from the same Docker
   gateway address, so the IP limit acts as one shared bucket.
-- The windows live in process memory: exact for one instance, reset on restart. Several instances
-  would need a shared store such as Redis.
+- The windows live in process memory: one limiter per application, built at startup and shared by
+  every request. The image runs a single Uvicorn process (no `--workers`, no `--reload`), so the
+  limits are exact. They reset whenever that process starts again: a restart, a rebuild, or a
+  reload in local development. Several instances or workers would each count separately and would
+  need a shared store such as Redis.
 - Limiting by destination has inherent side effects. A `429` reveals that someone recently
   submitted that address, and a third party can use up an address's budget for ten minutes.
 

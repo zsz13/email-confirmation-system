@@ -64,19 +64,21 @@ class Settings(DatabaseSettings):
     mailjet_timeout_seconds: float = 10.0
     # How often the background reconciler asks Mailjet about messages still in progress
     # (app.services.delivery_reconciler). One lookup per such message per cycle, so this is
-    # also the upper bound on how often any one message is looked up.
-    delivery_reconcile_interval_seconds: float = Field(default=5.0, ge=1)
+    # also the upper bound on how often any one message is looked up. The default matches the
+    # page's 3 s status polling, which reads what these lookups store; the two stay separate.
+    delivery_reconcile_interval_seconds: float = Field(default=3.0, ge=1)
 
     cors_origins: Annotated[list[str], NoDecode] = ["http://localhost:4200"]
 
     # Abuse protection for POST /api/v1/submissions, counted per client IP and per
     # normalised destination address. Process-local; see app.services.rate_limit.
-    rate_limit_ip_max_requests: int = Field(default=5, gt=0)
+    # Every request let through counts, whatever its email's delivery status turns out to be.
+    rate_limit_ip_max_requests: int = Field(default=3, gt=0)
     rate_limit_ip_window_seconds: float = Field(default=60.0, gt=0)
     rate_limit_email_max_requests: int = Field(default=3, gt=0)
     rate_limit_email_window_seconds: float = Field(default=600.0, gt=0)
     # Per client IP for GET /api/v1/submissions/{tracking_id}/status. The frontend polls
-    # every 5 s (12 a minute), so the default leaves room for a few tabs and manual checks.
+    # every 3 s (20 a minute), so the default leaves room for a second tab and manual checks.
     rate_limit_status_ip_max_requests: int = Field(default=60, gt=0)
     rate_limit_status_ip_window_seconds: float = Field(default=60.0, gt=0)
 

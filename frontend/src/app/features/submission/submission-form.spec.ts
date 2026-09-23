@@ -235,11 +235,13 @@ describe('SubmissionForm', () => {
       await submitSuccessfully();
 
       expect(badge()).toBe('Accepted for delivery');
-      expect(deliveryText()).toContain('Checking automatically every 5 seconds.');
+      expect(deliveryText()).toContain('Checking automatically every 3 seconds.');
       // The first read waits one interval: a 201 already means "accepted".
       http.expectNone(isStatusRequest);
 
-      await advance(STATUS_POLL_INTERVAL_MS);
+      await advance(2_999);
+      http.expectNone(isStatusRequest);
+      await advance(1);
       const request = http.expectOne(isStatusRequest);
       expect(request.request.method).toBe('GET');
       expect(request.request.url).toContain(TRACKING_ID);
@@ -247,6 +249,13 @@ describe('SubmissionForm', () => {
       await settle();
 
       expect(badge()).toBe('Queued by email provider');
+
+      // Every 3 seconds after the previous answer, not before.
+      await advance(2_999);
+      http.expectNone(isStatusRequest);
+      await advance(1);
+      http.expectOne(isStatusRequest).flush({ status: 'queued' });
+      await settle();
     });
 
     it('updates the badge and the live region as the stored status moves on', async () => {

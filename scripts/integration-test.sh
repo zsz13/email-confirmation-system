@@ -119,10 +119,44 @@ code="$(curl -sS -D "$TMP/headers.txt" -o "$TMP/body.json" -w '%{http_code}' -H 
 grep -qi '^retry-after: [0-9]' "$TMP/headers.txt" || fail "429 without Retry-After header"
 pass "fourth request for the same mailbox is 429 with Retry-After"
 
+# Every request above came through NGINX from one address, so the fourth hit both limits
+# (3 per 60 s per IP, 3 per 600 s per mailbox). Each limit is now shown on its own.
+IP_ONLY="ip-limit-$(date +%s)@example.com"
+code="$(curl -sS -D "$TMP/headers.txt" -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' \
+  -d "{\"name\":\"Integration Test\",\"email\":\"$IP_ONLY\"}" "$BASE/api/v1/submissions")"
+[ "$code" = "429" ] || fail "a fourth request from one client within 60 s returned $code for a fresh mailbox"
+ip_retry="$({ grep -i '^retry-after:' "$TMP/headers.txt" || true; } | tr -d '\r' | awk '{print $2}')"
+[ "${ip_retry:-0}" -ge 1 ] && [ "$ip_retry" -le 60 ] || fail "IP-limit Retry-After is '$ip_retry', expected 1-60"
+# NGINX overwrites the forwarding headers, so a client cannot pick a fresh limiter key.
+code="$(curl -sS -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' \
+  -H 'X-Forwarded-For: 203.0.113.7' -H 'X-Real-IP: 203.0.113.7' \
+  -d "{\"name\":\"Integration Test\",\"email\":\"$IP_ONLY\"}" "$BASE/api/v1/submissions")"
+[ "$code" = "429" ] || fail "a spoofed X-Forwarded-For escaped the IP limit ($code)"
+# The mailbox limit alone: a client the backend has not seen yet, from inside the Compose
+# network, where the backend trusts X-Forwarded-For (compose.yaml, FORWARDED_ALLOW_IPS).
+read -r code mailbox_retry < <(compose exec -T backend python -c '
+import json, sys, urllib.error, urllib.request
+body = json.dumps({"name": "Integration Test", "email": sys.argv[1]}).encode()
+request = urllib.request.Request("http://127.0.0.1:8000/api/v1/submissions", data=body,
+    headers={"Content-Type": "application/json", "X-Forwarded-For": "198.51.100.23"})
+try:
+    print(urllib.request.urlopen(request, timeout=5).status, "-")
+except urllib.error.HTTPError as error:
+    print(error.code, error.headers.get("Retry-After", "-"))
+' "$RECIPIENT")
+[ "$code" = "429" ] || fail "a fourth request for one mailbox from a fresh client returned $code"
+[ "$mailbox_retry" -gt 60 ] && [ "$mailbox_retry" -le 600 ] || fail "mailbox-limit Retry-After is '$mailbox_retry', expected 61-600"
+limiter_logs="$(compose logs --no-color backend)"
+grep -q 'rate limit rejected submission client_ip=198.51.100.23 ' <<<"$limiter_logs" \
+  || fail "the mailbox-only rejection was not keyed on the fresh client"
+pass "IP limit: a fresh mailbox is 429 after 3 requests from one client (Retry-After ${ip_retry}s), spoofed forwarding headers change nothing; mailbox limit: 429 for a fresh client (Retry-After ${mailbox_retry}s)"
+
 messages="$(curl -fsS "http://127.0.0.1:${MAILJET_STUB_PORT}/messages")"
 count="$(printf '%s' "$messages" | { grep -o "$RECIPIENT" || true; } | wc -l | tr -d ' ')"
 [ "$count" = "3" ] || fail "the email stub saw $count sends for $RECIPIENT, expected 3: $messages"
-pass "the stubbed provider received exactly 3 messages for $RECIPIENT"
+grep -qF "$IP_ONLY" <<<"$messages" && fail "a rate-limited request reached the email stub"
+[ "$(mysql_query "SELECT COUNT(*) FROM submissions")" = "3" ] || fail "a rate-limited request stored a row"
+pass "the stubbed provider received exactly 3 messages for $RECIPIENT; no rejected request stored a row or reached it"
 
 step "9b. Request correlation through the proxy, and log hygiene"
 code="$(curl -sS -o /dev/null -D "$TMP/headers.txt" -w '%{http_code}' -H 'Content-Type: application/json' \
@@ -182,8 +216,24 @@ grep -Eq "\[-\] app\.services\.delivery_status: delivery_status_updated submissi
   || fail "accepted -> queued was not stored by the reconciler for $first_id"
 grep -Eq "\[-\] app\.services\.delivery_status: delivery_status_updated submission_id=$first_id previous_status=queued new_status=delivered final=true source=reconciler provider_duration_ms=[0-9.]+" <<<"$reconciler_logs" \
   || fail "queued -> delivered was not stored by the reconciler for $first_id"
-grep -q 'delivery reconciler started interval_s=1 ' <<<"$reconciler_logs" || fail "the reconciler did not log its start"
-pass "the running backend moved all 3 rows accepted -> queued -> delivered by itself, logged without a request id"
+grep -q 'delivery reconciler started interval_s=3 ' <<<"$reconciler_logs" || fail "the reconciler did not log its start"
+# The stub answers queued on a message's first lookup and sent on the next, so one row's two
+# transitions are exactly one reconcile cycle apart: the interval, plus the cycle's own lookups.
+transition_ms() {
+  awk -v row="submission_id=$1 previous_status=$2 new_status=$3 " '
+    index($0, row) && index($0, "source=reconciler") &&
+    match($0, /[0-9][0-9]:[0-9][0-9]:[0-9][0-9],[0-9][0-9][0-9]/) {
+      split(substr($0, RSTART, RLENGTH), t, /[:,]/)
+      print ((t[1] * 60 + t[2]) * 60 + t[3]) * 1000 + t[4]
+      exit
+    }' <<<"$reconciler_logs"
+}
+queued_at="$(transition_ms "$first_id" accepted queued)"
+delivered_at="$(transition_ms "$first_id" queued delivered)"
+cycle_ms=$(( (delivered_at - queued_at + 86400000) % 86400000 ))
+[ "$cycle_ms" -ge 2900 ] && [ "$cycle_ms" -le 5000 ] \
+  || fail "one reconcile cycle took ${cycle_ms} ms, expected about 3000"
+pass "the running backend moved all 3 rows accepted -> queued -> delivered by itself, one cycle every 3 s (measured ${cycle_ms} ms), logged without a request id"
 
 step "10a'. The manual delivery check shares the same lookup (python -m app.check_delivery)"
 if ! check="$(compose exec -T backend python -m app.check_delivery "$first_id" --timeout 20 --interval 1)"; then
@@ -209,6 +259,7 @@ done
 # here on would have been caused by a status read.
 lookups() { compose logs --no-color mailjet-stub | { grep -c 'GET /v3/REST/message/' || true; }; }
 before="$(lookups)"
+quiet_since=$SECONDS
 # The reconciler's own lookups (steps 10a, 10a') are in there: proof the counter counts.
 [ "$before" -gt 0 ] || fail "no Mailjet lookup found in the stub log; the lookup counter is broken"
 # Written straight into MySQL behind the backend's back: the endpoint must show it at once.
@@ -218,7 +269,20 @@ mysql_query "UPDATE submissions SET email_status='delivered' WHERE id=UUID_TO_BI
 for _ in 1 2 3 4 5; do
   [ "$(curl -fsS "$status_url")" = '{"status":"delivered"}' ] || fail "the status endpoint did not read the database"
 done
-[ "$(lookups)" = "$before" ] || fail "status reads caused Mailjet lookups ($before before, $(lookups) after)"
+# At least two reconcile cycles pass with every row final: they must not call Mailjet either.
+# SECONDS counts whole seconds, so 8 on its clock is at least 7 s: two 3 s cycles or more.
+while [ $((SECONDS - quiet_since)) -lt 8 ]; do sleep 1; done
+[ "$(lookups)" = "$before" ] || fail "Mailjet was called with every row final ($before lookups before, $(lookups) after)"
+# ...and the reconciler was idle, not gone: a row made unfinished again is looked up exactly
+# once (the stub now answers sent for it) and is delivered again.
+mysql_query "UPDATE submissions SET email_status='queued' WHERE id=UUID_TO_BIN('$tracking_id')"
+for _ in $(seq 1 10); do
+  status="$(mysql_query "SELECT email_status FROM submissions WHERE id=UUID_TO_BIN('$tracking_id')")"
+  [ "$status" = "delivered" ] && [ "$(lookups)" -gt "$before" ] && break
+  sleep 1
+done
+[ "$status" = "delivered" ] || fail "the reconciler did not pick up a row made unfinished after the quiet period"
+[ "$(lookups)" = "$((before + 1))" ] || fail "one unfinished row caused $(( $(lookups) - before )) lookups, expected 1"
 not_found='{"detail":"No submission matches this tracking ID."}'
 for id in not-a-uuid 1 "$(printf '%s' "$tracking_id" | sed 's/^......../00000000/')"; do
   code="$(curl -sS -o "$TMP/status.json" -w '%{http_code}' "$BASE/api/v1/submissions/$id/status")"
@@ -227,7 +291,7 @@ for id in not-a-uuid 1 "$(printf '%s' "$tracking_id" | sed 's/^......../00000000
 done
 code="$(curl -sS -o /dev/null -w '%{http_code}' "$BASE/api/v1/submissions")"
 [ "$code" = "405" ] || fail "GET /api/v1/submissions returned $code; there must be no public listing"
-pass "status reads MySQL (a direct UPDATE shows at once), returns only {\"status\"} with no-store, caused 0 Mailjet lookups in 6 reads (stub log: $before lookups before and after); invalid and unknown ids share one 404; no listing"
+pass "status reads MySQL (a direct UPDATE shows at once), returns only {\"status\"} with no-store; 6 status reads and at least 7 s of reconcile cycles with every row final caused 0 Mailjet lookups (stub log: $before before and after), and a row made unfinished again was looked up once; invalid and unknown ids share one 404; no listing"
 
 step "10b. Migration round trip on live data (downgrade to the integer key and back)"
 # Schema and code change together (see the migration), so the backend - and with it the
