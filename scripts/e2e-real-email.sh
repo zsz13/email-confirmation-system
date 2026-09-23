@@ -101,15 +101,16 @@ echo "==> Checking the database row"
 row="$(mysql_query "SELECT BIN_TO_UUID(id), email_status, IFNULL(mailjet_message_id, '') FROM submissions WHERE email='$RECIPIENT'")"
 [ -n "$row" ] || fail "no row stored for $RECIPIENT"
 IFS=$'\t' read -r id status message_id <<<"$row"
-printf '%s' "$id" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-7' || fail "id is not a UUIDv7: $id"
+grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-7' <<<"$id" || fail "id is not a UUIDv7: $id"
 [ "$id" = "$tracking_id" ] || fail "the tracking id $tracking_id is not the stored row's id $id"
 # Accepted, not delivered: the Send API answer says nothing about the recipient's server.
 # The backend's reconciler may already have moved the row on; the request stored accepted.
 case "$status" in accepted | queued | retrying | delivered) ;; *) fail "email_status is '$status'" ;; esac
 [ -n "$message_id" ] || fail "no Mailjet MessageID was stored"
-# Captured first: `compose logs | grep -q` fails under pipefail when grep stops reading early.
+# Captured first, then searched with a here-string: a pipe into `grep -q` fails under pipefail
+# when grep stops reading early and the writer gets a broken pipe.
 backend_logs="$(compose logs --no-color backend)"
-printf '%s' "$backend_logs" | grep -q "delivery_status_updated submission_id=$id previous_status=pending new_status=accepted" \
+grep -q "delivery_status_updated submission_id=$id previous_status=pending new_status=accepted" <<<"$backend_logs" \
   || fail "the request did not store accepted"
 echo "    row $id was stored as accepted with a Mailjet MessageID (now: $status)"
 

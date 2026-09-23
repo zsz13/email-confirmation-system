@@ -132,8 +132,9 @@ request bodies or Mailjet response bodies.
     and UUIDs an admin searched for are not recorded there. The admin pages send
     `Referrer-Policy: no-referrer`, so requests they cause elsewhere, such as the browser's
     `/favicon.ico`, do not carry the panel URL into the logged locations either.
-  - NGINX's error log is still on for that location. If NGINX itself fails a request, for example
-    when the backend is unreachable, its error line can contain the request path.
+  - NGINX's error log is still on for that location, and its warnings and errors quote the request
+    line. They can therefore contain the path, for example when the backend is unreachable or
+    when a large admin asset is buffered to a temporary file.
 - Tests check the logs of real submissions, admin logins and every Mailjet failure path, and the
   integration test checks the running containers' logs.
 

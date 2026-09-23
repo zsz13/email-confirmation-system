@@ -86,9 +86,11 @@ curl -fsS -D "$TMP/docs.headers" -o "$TMP/docs.html" "$BASE/docs" || fail "GET /
 grep -q 'swagger-ui' "$TMP/docs.html" || fail "/docs is not the Swagger UI page"
 grep -iq "^content-security-policy:.*script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;" "$TMP/docs.headers" \
   || fail "the /docs policy blocks the Swagger UI bundle: $(grep -i '^content-security-policy' "$TMP/docs.headers")"
-curl -fsS -D - -o /dev/null "$BASE/" | grep -iq "^content-security-policy:.*script-src 'self';" \
+spa_headers="$(curl -fsS -D - -o /dev/null "$BASE/")"
+grep -iq "^content-security-policy:.*script-src 'self';" <<<"$spa_headers" \
   || fail "the SPA lost its strict script policy"
-curl -fsS "$BASE/openapi.json" | grep -q '"/api/v1/submissions"' || fail "/openapi.json is not proxied"
+openapi="$(curl -fsS "$BASE/openapi.json")"
+grep -q '"/api/v1/submissions"' <<<"$openapi" || fail "/openapi.json is not proxied"
 pass "API docs: /docs is Swagger UI with a policy that lets it load, /openapi.json is proxied"
 
 step "9. API integration checks"
@@ -129,35 +131,36 @@ code="$(curl -sS -o /dev/null -D "$TMP/headers.txt" -w '%{http_code}' -H 'Conten
 grep -qi '^x-request-id: integration-correlation-1' "$TMP/headers.txt" || fail "the client's request id did not come back through the proxy"
 curl -sS -o /dev/null -D "$TMP/headers.txt" "$BASE/api/v1/health"
 generated="$(grep -i '^x-request-id:' "$TMP/headers.txt" | tr -d '\r' | awk '{print $2}')"
-printf '%s' "$generated" | grep -Eq '^[0-9a-f]{32}$' || fail "no request id was generated for a request without one: '$generated'"
+grep -Eq '^[0-9a-f]{32}$' <<<"$generated" || fail "no request id was generated for a request without one: '$generated'"
 backend_logs="$(compose logs --no-color backend)"
 # The path is logged quoted (repr), so a client cannot forge a log line with a decoded newline.
-printf '%s' "$backend_logs" | grep -q "request completed method=POST path='/api/v1/submissions' status_code=422" \
+grep -q "request completed method=POST path='/api/v1/submissions' status_code=422" <<<"$backend_logs" \
   || fail "the completed request was not logged"
-printf '%s' "$backend_logs" | grep -q 'integration-correlation-1' || fail "the request id is not in the backend log"
+grep -q 'integration-correlation-1' <<<"$backend_logs" || fail "the request id is not in the backend log"
 forged="$(curl -sS -o /dev/null -w '%{http_code}' "$BASE/api/v1/x%0A2026-01-01%20CRITICAL%20forged")"
 [ "$forged" = "404" ] || fail "the forged-path request returned $forged"
 forged_logs="$(compose logs --no-color backend)"
 # The decoded newline is escaped inside one quoted value...
-printf '%s' "$forged_logs" | grep -qF "path='/api/v1/x\\n2026-01-01 CRITICAL forged'" \
+grep -qF "path='/api/v1/x\\n2026-01-01 CRITICAL forged'" <<<"$forged_logs" \
   || fail "the path with a decoded newline was not escaped into a single log line"
 # ...so no log line of its own begins with what the client sent.
-printf '%s' "$forged_logs" | grep -qE '^[a-z0-9-]+ +\| *2026-01-01 CRITICAL' \
+grep -qE '^[a-z0-9-]+ +\| *2026-01-01 CRITICAL' <<<"$forged_logs" \
   && fail "a client wrote its own line into the backend log"
 pass "the client's request id is echoed through the proxy and logged, one is generated when absent, and a decoded newline in the path cannot forge a log line"
 
 step "10. MySQL persistence and the UUIDv7 primary key"
 rows="$(mysql_query "SELECT BIN_TO_UUID(id), email, email_status, IFNULL(mailjet_message_id, '') FROM submissions WHERE email='$RECIPIENT' ORDER BY id")"
-# Captured once: `compose logs | grep -q` fails under pipefail when grep stops reading early.
+# Captured once, then searched with here-strings: a pipe into `grep -q` fails under pipefail
+# when grep stops reading early and the writer gets a broken pipe.
 submission_logs="$(compose logs --no-color backend)"
 [ "$(printf '%s\n' "$rows" | grep -c .)" = "3" ] || fail "expected 3 rows, got: $rows"
 printf '%s\n' "$rows" | while IFS=$'\t' read -r id email status message_id; do
-  printf '%s' "$id" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$' || fail "id is not a UUIDv7: $id"
+  grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$' <<<"$id" || fail "id is not a UUIDv7: $id"
   # The background reconciler may already have moved the row on (step 10a checks how).
   case "$status" in accepted | queued | delivered) ;; *) fail "row $id has status $status" ;; esac
-  printf '%s' "$message_id" | grep -Eq '^[0-9]+$' || fail "row $id has no Mailjet MessageID"
+  grep -Eq '^[0-9]+$' <<<"$message_id" || fail "row $id has no Mailjet MessageID"
   # Send API acceptance is not delivery: the request itself stored accepted, nothing more.
-  printf '%s' "$submission_logs" | grep -q "delivery_status_updated submission_id=$id previous_status=pending new_status=accepted final=false source=send_api" \
+  grep -q "delivery_status_updated submission_id=$id previous_status=pending new_status=accepted final=false source=send_api" <<<"$submission_logs" \
     || fail "the request did not store accepted for row $id"
 done
 column="$(mysql_query "SELECT COLUMN_TYPE, COLUMN_KEY FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='$MYSQL_DATABASE' AND TABLE_NAME='submissions' AND COLUMN_NAME='id'")"
@@ -175,18 +178,18 @@ done
   || fail "the reconciler did not deliver all 3 rows: $(mysql_query "SELECT email_status FROM submissions WHERE email='$RECIPIENT'")"
 reconciler_logs="$(compose logs --no-color backend)"
 # No request started this work, so its lines carry the "-" request id.
-printf '%s' "$reconciler_logs" | grep -Eq "\[-\] app\.services\.delivery_status: delivery_status_updated submission_id=$first_id previous_status=accepted new_status=queued final=false source=reconciler provider_duration_ms=[0-9.]+" \
+grep -Eq "\[-\] app\.services\.delivery_status: delivery_status_updated submission_id=$first_id previous_status=accepted new_status=queued final=false source=reconciler provider_duration_ms=[0-9.]+" <<<"$reconciler_logs" \
   || fail "accepted -> queued was not stored by the reconciler for $first_id"
-printf '%s' "$reconciler_logs" | grep -Eq "\[-\] app\.services\.delivery_status: delivery_status_updated submission_id=$first_id previous_status=queued new_status=delivered final=true source=reconciler provider_duration_ms=[0-9.]+" \
+grep -Eq "\[-\] app\.services\.delivery_status: delivery_status_updated submission_id=$first_id previous_status=queued new_status=delivered final=true source=reconciler provider_duration_ms=[0-9.]+" <<<"$reconciler_logs" \
   || fail "queued -> delivered was not stored by the reconciler for $first_id"
-printf '%s' "$reconciler_logs" | grep -q 'delivery reconciler started interval_s=1 ' || fail "the reconciler did not log its start"
+grep -q 'delivery reconciler started interval_s=1 ' <<<"$reconciler_logs" || fail "the reconciler did not log its start"
 pass "the running backend moved all 3 rows accepted -> queued -> delivered by itself, logged without a request id"
 
 step "10a'. The manual delivery check shares the same lookup (python -m app.check_delivery)"
 if ! check="$(compose exec -T backend python -m app.check_delivery "$first_id" --timeout 20 --interval 1)"; then
   fail "the delivery check did not report delivery: $check"
 fi
-printf '%s' "$check" | grep -q '^RESULT: DELIVERED' || fail "unexpected delivery check output: $check"
+grep -q '^RESULT: DELIVERED' <<<"$check" || fail "unexpected delivery check output: $check"
 [ "$(mysql_query "SELECT email_status FROM submissions WHERE id=UUID_TO_BIN('$first_id')")" = "delivered" ] \
   || fail "the delivered state was not stored"
 pass "python -m app.check_delivery polled the message resource, printed RESULT: DELIVERED and stored 'delivered'"
@@ -237,7 +240,7 @@ legacy="$(mysql_query "SELECT COLUMN_TYPE, EXTRA FROM information_schema.COLUMNS
 compose run --rm --no-deps -T migrate alembic upgrade head >/dev/null
 again="$(mysql_query "SELECT BIN_TO_UUID(id) FROM submissions ORDER BY created_at")"
 [ "$(printf '%s\n' "$again" | grep -c .)" = "3" ] || fail "rows lost across the round trip: $again"
-printf '%s\n' "$again" | grep -Evq '^[0-9a-f]{8}-[0-9a-f]{4}-7' && fail "upgrade produced a non-v7 id: $again"
+grep -Evq '^[0-9a-f]{8}-[0-9a-f]{4}-7' <<<"$again" && fail "upgrade produced a non-v7 id: $again"
 [ "$(printf '%s\n' "$again" | sort)" = "$again" ] || fail "re-generated ids are not in created_at order"
 current="$(compose run --rm --no-deps -T migrate alembic current 2>/dev/null | { grep -o '[0-9a-f]\{12\}' || true; } | head -n1)"
 [ "$current" = "c3d8e1f4a6b2" ] || fail "alembic current is not the delivery-status revision: $current"
@@ -251,7 +254,7 @@ enum="$(mysql_query "SELECT COLUMN_TYPE FROM information_schema.COLUMNS WHERE TA
 compose run --rm --no-deps -T migrate alembic upgrade head >/dev/null
 [ "$(mysql_query "SELECT BIN_TO_UUID(id) FROM submissions ORDER BY created_at")" = "$again" ] || fail "re-running upgrade changed the keys"
 check="$(compose run --rm --no-deps -T migrate alembic check 2>&1 | tail -n1)"
-printf '%s' "$check" | grep -q 'No new upgrade operations detected' || fail "models and migrations differ: $check"
+grep -q 'No new upgrade operations detected' <<<"$check" || fail "models and migrations differ: $check"
 pass "downgrade renumbered 1..3, upgrade re-keyed all 3 rows with ordered UUIDv7 ids, re-upgrade is a no-op, alembic check is clean"
 
 step "10c. A restarted backend resumes a row it left unfinished"
@@ -267,7 +270,7 @@ done
 [ "$(mysql_query "SELECT email_status FROM submissions WHERE id=UUID_TO_BIN('$resume_id')")" = "delivered" ] \
   || fail "the restarted backend did not resume row $resume_id"
 resumed_logs="$(compose logs --no-color backend)"
-printf '%s' "$resumed_logs" | grep -q "delivery_status_updated submission_id=$resume_id previous_status=accepted new_status=delivered final=true source=reconciler" \
+grep -q "delivery_status_updated submission_id=$resume_id previous_status=accepted new_status=delivered final=true source=reconciler" <<<"$resumed_logs" \
   || fail "the resumed transition was not logged"
 [ "$(curl -fsS "$BASE/api/v1/health")" = '{"status":"ok"}' ] || fail "the restarted backend is not healthy"
 pass "after a restart the backend found row $resume_id still accepted and stored delivered without being asked"
@@ -304,9 +307,9 @@ FROM seq"
 new_id="$id_alice"
 uuids_in_order() { printf '%s' "$1" | { grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}' || true; } | awk '!seen[$0]++'; }
 dashboard="$(curl -fsS -b "$COOKIES" "$BASE$ADMIN_PATH/")"
-printf '%s' "$dashboard" | grep -q 'Total submissions' || fail "dashboard has no summary cards"
+grep -q 'Total submissions' <<<"$dashboard" || fail "dashboard has no summary cards"
 listing="$(curl -fsS -b "$COOKIES" "$BASE$ADMIN_PATH/submission/list")"
-printf '%s' "$listing" | grep -q "$RECIPIENT" || fail "list does not show $RECIPIENT"
+grep -q "$RECIPIENT" <<<"$listing" || fail "list does not show $RECIPIENT"
 assets="$(printf '%s' "$listing" | { grep -oE '(src|href)="[^"]*/statics/[^"]*"' || true; } | cut -d'"' -f2 | sort -u)"
 [ -n "$assets" ] || fail "list page references no static assets"
 for asset in $assets; do
@@ -314,9 +317,9 @@ for asset in $assets; do
   code="$(curl -sS -o /dev/null -w '%{http_code}' "$asset")"
   [ "$code" = "200" ] || fail "asset $asset returned $code"
 done
-printf '%s' "$listing" | grep -q "$new_id" || fail "list does not show the UUIDv7 id $new_id"
-printf '%s' "$listing" | grep -q '/submission/create' && fail "list offers a create action"
-printf '%s' "$listing" | grep -q '/submission/export/' && fail "list offers an export action"
+grep -q "$new_id" <<<"$listing" || fail "list does not show the UUIDv7 id $new_id"
+grep -q '/submission/create' <<<"$listing" && fail "list offers a create action"
+grep -q '/submission/export/' <<<"$listing" && fail "list offers an export action"
 search="$(curl -fsS -b "$COOKIES" "$BASE$ADMIN_PATH/submission/list?search=bob+br")"
 [ "$(uuids_in_order "$search")" = "$id_bob" ] || fail "search 'bob br' did not return exactly Bob: $(uuids_in_order "$search")"
 search="$(curl -fsS -b "$COOKIES" "$BASE$ADMIN_PATH/submission/list?search=$RECIPIENT")"
@@ -324,9 +327,9 @@ search="$(curl -fsS -b "$COOKIES" "$BASE$ADMIN_PATH/submission/list?search=$RECI
 # Searching the BINARY(16) key: the comparison is against the key itself, not a text LIKE.
 search="$(curl -fsS -b "$COOKIES" "$BASE$ADMIN_PATH/submission/list?search=$id_carol")"
 [ "$(uuids_in_order "$search")" = "$id_carol" ] || fail "search by UUID did not return exactly Carol: $(uuids_in_order "$search")"
-printf '%s' "$search" | grep -q 'Alice Adams' && fail "search by UUID returned another row"
+grep -q 'Alice Adams' <<<"$search" && fail "search by UUID returned another row"
 missing="$(curl -fsS -b "$COOKIES" "$BASE$ADMIN_PATH/submission/list?search=01234567-89ab-7cde-8f01-23456789abcd")"
-printf '%s' "$missing" | grep -qE 'Alice Adams|Bob Brown|Carol Clark' && fail "a UUID that matches no row returned rows"
+grep -qE 'Alice Adams|Bob Brown|Carol Clark' <<<"$missing" && fail "a UUID that matches no row returned rows"
 for term in "0199c0e1-1234-7abc-89de" "zzzzzzzz-zzzz-7zzz-zzzz-zzzzzzzzzzzz" "' OR 1=1 --"; do
   code="$(curl -sS -o "$TMP/search.html" -w '%{http_code}' -b "$COOKIES" --get --data-urlencode "search=$term" "$BASE$ADMIN_PATH/submission/list")"
   [ "$code" = "200" ] || fail "search for '$term' returned $code"
@@ -368,36 +371,39 @@ compose exec -T backend sh -c 'case "$DATABASE_URL" in mysql+asyncmy://'"$MYSQL_
 compose exec -T backend sh -c '[ -z "$MYSQL_ROOT_PASSWORD" ]' || fail "the root password reached the backend container"
 # Everything the run produced, including the failed admin login from step 11.
 all_logs="$(compose logs --no-color)"
-printf '%s' "$all_logs" | grep -qi 'GENERATED ROOT PASSWORD' && fail "MySQL printed a generated root password"
+grep -qi 'GENERATED ROOT PASSWORD' <<<"$all_logs" && fail "MySQL printed a generated root password"
 # No credential in any service's log.
 for secret in "$MYSQL_PASSWORD" "$MYSQL_ROOT_PASSWORD" "$ADMIN_PASS" "integration-stub-secret" "integration-stub-key"; do
-  printf '%s' "$all_logs" | grep -qF "$secret" && fail "a credential reached a log"
+  grep -qF "$secret" <<<"$all_logs" && fail "a credential reached a log"
 done
 # Addresses are checked against what the application itself logs; the Mailjet stub exists to
 # record the messages it was sent.
 backend_only="$(compose logs --no-color backend)"
-printf '%s' "$backend_only" | grep -qF "$RECIPIENT" && fail "a full recipient address reached the backend log"
-printf '%s' "$backend_only" | grep -q "recipient=i\\*\\*\\*@example.com" || fail "the masked recipient is not in the backend log"
-printf '%s' "$backend_only" | grep -q 'admin login failed' || fail "the failed admin login was not logged"
+grep -qF "$RECIPIENT" <<<"$backend_only" && fail "a full recipient address reached the backend log"
+grep -q "recipient=i\\*\\*\\*@example.com" <<<"$backend_only" || fail "the masked recipient is not in the backend log"
+grep -q 'admin login failed' <<<"$backend_only" || fail "the failed admin login was not logged"
 # The panel's location stays out of the backend log: startup only says it is on, and the
 # admin requests of step 11 are logged under a placeholder.
-printf '%s' "$backend_only" | grep -q 'application startup .*admin_enabled=true' || fail "startup did not log admin_enabled=true"
-printf '%s' "$backend_only" | grep -qF "${ADMIN_PATH#/}" && fail "the admin path reached the backend log"
-printf '%s' "$backend_only" | grep -qF "path='<admin>/login'" || fail "admin requests are not logged under the placeholder"
-# NGINX does not log the panel at all, so neither its path nor the address typed into its
-# search box in step 11 reaches the frontend log, while the rest of the site is still logged.
-frontend_only="$(compose logs --no-color frontend)"
-printf '%s' "$frontend_only" | grep -qF "${ADMIN_PATH#/}" && fail "the admin path reached the NGINX access log"
-printf '%s' "$frontend_only" | grep -qF "$RECIPIENT" && fail "an admin search term reached the NGINX access log"
-printf '%s' "$frontend_only" | grep -qF 'GET /api/v1/health' || fail "the NGINX access log no longer records the API"
+grep -q 'application startup .*admin_enabled=true' <<<"$backend_only" || fail "startup did not log admin_enabled=true"
+grep -qF "${ADMIN_PATH#/}" <<<"$backend_only" && fail "the admin path reached the backend log"
+grep -qF "path='<admin>/login'" <<<"$backend_only" || fail "admin requests are not logged under the placeholder"
+# NGINX keeps no access log for the panel, so neither its path nor the address typed into its
+# search box in step 11 reaches the access log, while the rest of the site is still logged.
+# Only access lines are checked: the error log is on for every location, and a warning such
+# as a large admin asset being buffered to disk quotes the request line (see docs/security.md).
+frontend_access="$(compose logs --no-color frontend | { grep -vE '[0-9]{4}/[0-9]{2}/[0-9]{2} [0-9:]{8} \[[a-z]+\] ' || true; })"
+grep -qF "${ADMIN_PATH#/}" <<<"$frontend_access" && fail "the admin path reached the NGINX access log"
+grep -qF "$RECIPIENT" <<<"$frontend_access" && fail "an admin search term reached the NGINX access log"
+grep -qF 'GET /api/v1/health' <<<"$frontend_access" || fail "the NGINX access log no longer records the API"
 # curl sends no Referer, so the browser side is checked through the policy: the panel's
 # pages must not hand their URL (search terms included) to requests NGINX does log, such
 # as the browser's own /favicon.ico.
-curl -fsS -D - -o /dev/null "$BASE$ADMIN_PATH/login" | grep -iq '^referrer-policy: no-referrer' \
+admin_headers="$(curl -fsS -D - -o /dev/null "$BASE$ADMIN_PATH/login")"
+grep -iq '^referrer-policy: no-referrer' <<<"$admin_headers" \
   || fail "the admin pages would send their URL as Referer to logged locations"
 # Every submission logs where its time went.
-printf '%s' "$backend_only" | grep -Eq 'submission timings submission_id=[0-9a-f-]{36} db_create_duration_ms=[0-9.]+ mailjet_request_duration_ms=[0-9.]+ db_status_update_duration_ms=[0-9.]+ duration_ms=[0-9.]+' \
+grep -Eq 'submission timings submission_id=[0-9a-f-]{36} db_create_duration_ms=[0-9.]+ mailjet_request_duration_ms=[0-9.]+ db_status_update_duration_ms=[0-9.]+ duration_ms=[0-9.]+' <<<"$backend_only" \
   || fail "the stage timings of a submission were not logged"
-pass "backend connects as $MYSQL_USER with no root password in its environment; no generated root password and no credential in any service log; no full address in the backend log, only the masked form; no admin path in the backend or NGINX log; stage timings logged"
+pass "backend connects as $MYSQL_USER with no root password in its environment; no generated root password and no credential in any service log; no full address in the backend log, only the masked form; no admin path in the backend log or the NGINX access log; stage timings logged"
 
 printf '\nIntegration test passed.\n'

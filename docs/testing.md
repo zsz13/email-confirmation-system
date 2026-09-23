@@ -115,7 +115,7 @@ and checks the running stack from the outside with `curl` and `mysql`:
 7. The admin panel: login, search by name, email and UUIDv7 id against the real column, status
    filter, sorting (including MySQL's `ENUM` order), pagination, details, and `403` for writes.
 8. No credential or generated root password in any service log; only masked recipient addresses in
-   the backend log; no admin path in the backend or NGINX logs; the backend connects as the
+   the backend log; no admin path in the backend log or NGINX's access log; the backend connects as the
    application user.
 
 It uses its own Compose project and ports (`4300`, `3307`, `8025`), so a stack started with
