@@ -21,6 +21,7 @@ FROM nginxinc/nginx-unprivileged:1.30 AS runtime
 
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY nginx-headers.conf /etc/nginx/snippets/headers.conf
+COPY nginx-backend-locations.conf /etc/nginx/snippets/backend-locations.conf
 COPY --from=builder /app/dist/frontend/browser /usr/share/nginx/html
 
 # The base image already runs as nginx (uid 101); stated explicitly so it cannot regress.

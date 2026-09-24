@@ -1,0 +1,207 @@
+# Production stack for one VPS, served at https://$DOMAIN. Guide: docs/deployment-vps.md.
+#
+#     docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+#
+# Start-up order: mysql (healthy) -> migrate (exits 0) -> backend (healthy) -> frontend (healthy);
+# basic-auth writes the htpasswd file and exits; certbot publishes a certificate (a temporary
+# self-signed one on the very first start) and becomes healthy; then nginx starts.
+#
+# nginx is the only service with published ports, 80 and 443. It answers the ACME challenge,
+# redirects HTTP to HTTPS, terminates TLS, requires HTTP Basic Auth for everything else and
+# proxies to the frontend and the backend. MySQL, the backend and the frontend are reachable on
+# the Compose network only. Every credential comes from the git-ignored .env.prod (placeholders
+# in .env.prod.example); none is written here or built into an image. The local stack,
+# compose.yaml, is separate: its own project name, containers, images and volumes.
+
+name: email-confirmation-prod
+
+x-hardened: &hardened
+  security_opt:
+    - no-new-privileges:true
+  # Bounded container logs, so a long-running server cannot fill its disk with them.
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+# migrate and backend run the same image, so the schema and the code can never drift apart.
+x-backend-image: &backend-image
+  build: ./backend
+  image: email-confirmation-prod-backend
+
+# The password is substituted into a URL, so it must be URL-safe; .env.prod.example says so.
+x-database-url: &database-url
+  DATABASE_URL: mysql+asyncmy://${MYSQL_USER:?set MYSQL_USER in .env.prod}:${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env.prod}@mysql:3306/${MYSQL_DATABASE:?set MYSQL_DATABASE in .env.prod}
+
+services:
+  mysql:
+    <<: *hardened
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      # Explicit, so the image does not generate one and print it into the log. Root is used
+      # by the image's own bootstrap only and cannot log in over TCP.
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env.prod}
+      MYSQL_ROOT_HOST: localhost
+      MYSQL_DATABASE: ${MYSQL_DATABASE:?set MYSQL_DATABASE in .env.prod}
+      MYSQL_USER: ${MYSQL_USER:?set MYSQL_USER in .env.prod}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env.prod}
+    # No ports: only migrate and the backend connect, over the Compose network.
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "MYSQL_PWD=\"$$MYSQL_PASSWORD\" mysqladmin ping -h 127.0.0.1 -u\"$$MYSQL_USER\" --silent",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+  migrate:
+    <<: [*hardened, *backend-image]
+    command: ["alembic", "upgrade", "head"]
+    environment: *database-url
+    cap_drop:
+      - ALL
+    healthcheck:
+      disable: true
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  backend:
+    <<: [*hardened, *backend-image]
+    restart: unless-stopped
+    # An explicit list, so the backend never receives the MySQL root or Basic Auth credentials.
+    # A new required setting in backend/app/core/config.py must be added here and to
+    # .env.prod.example as well.
+    environment:
+      <<: *database-url
+      # Trust X-Forwarded-For from any peer: the peers are the two NGINX containers, which
+      # overwrite the header with the client address. Safe only because port 8000 is never
+      # published.
+      FORWARDED_ALLOW_IPS: "*"
+      MAILJET_API_KEY: ${MAILJET_API_KEY:?set MAILJET_API_KEY in .env.prod}
+      MAILJET_SECRET_KEY: ${MAILJET_SECRET_KEY:?set MAILJET_SECRET_KEY in .env.prod}
+      MAILJET_SENDER_EMAIL: ${MAILJET_SENDER_EMAIL:?set MAILJET_SENDER_EMAIL in .env.prod}
+      MAILJET_SENDER_NAME: ${MAILJET_SENDER_NAME:-Email Confirmation System}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:?set ADMIN_USERNAME in .env.prod}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD in .env.prod}
+      ADMIN_SESSION_SECRET: ${ADMIN_SESSION_SECRET:?set ADMIN_SESSION_SECRET in .env.prod}
+      # The admin session cookie is sent over HTTPS only, and the backend refuses to start while
+      # the committed demo admin password or session secret is in force.
+      ADMIN_COOKIE_SECURE: "true"
+      # The browser calls the API on its own origin; no other origin is allowed.
+      CORS_ORIGINS: https://${DOMAIN:?set DOMAIN in .env.prod}
+    cap_drop:
+      - ALL
+    expose:
+      - "8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  frontend:
+    <<: *hardened
+    build: ./frontend
+    image: email-confirmation-prod-frontend
+    restart: unless-stopped
+    # No ports: nginx proxies to it.
+    cap_drop:
+      - ALL
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  # One-shot: writes the bcrypt htpasswd file NGINX checks, from .env.prod, on every `up`.
+  basic-auth:
+    <<: *hardened
+    image: httpd:2.4-alpine
+    command: ["/bin/sh", "/deploy/basic-auth.sh"]
+    environment:
+      BASIC_AUTH_USERNAME: ${BASIC_AUTH_USERNAME:?set BASIC_AUTH_USERNAME in .env.prod}
+      BASIC_AUTH_PASSWORD: ${BASIC_AUTH_PASSWORD:?set BASIC_AUTH_PASSWORD in .env.prod}
+    volumes:
+      - ./deploy/basic-auth.sh:/deploy/basic-auth.sh:ro
+      - basic_auth:/auth
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+
+  # Issues the Let's Encrypt certificate, checks for renewal every 12 hours and publishes each
+  # new certificate to the tls volume; see deploy/certbot.sh.
+  certbot:
+    <<: *hardened
+    image: certbot/certbot:v5.8.0
+    entrypoint: ["/bin/sh", "/deploy/certbot.sh"]
+    restart: unless-stopped
+    # A real init as PID 1, so `docker compose stop` ends the shell loop at once.
+    init: true
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env.prod}
+      LETSENCRYPT_EMAIL: ${LETSENCRYPT_EMAIL:?set LETSENCRYPT_EMAIL in .env.prod}
+    volumes:
+      - ./deploy/certbot.sh:/deploy/certbot.sh:ro
+      - letsencrypt:/etc/letsencrypt
+      - acme_webroot:/var/www/certbot
+      - tls:/tls
+    cap_drop:
+      - ALL
+    cap_add:
+      # Hands the published certificate files to NGINX's user.
+      - CHOWN
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /tls/fullchain.pem && test -s /tls/privkey.pem"]
+      interval: 30s
+      timeout: 3s
+      start_period: 30s
+      start_interval: 1s
+
+  nginx:
+    <<: *hardened
+    image: nginxinc/nginx-unprivileged:1.30
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env.prod}
+    ports:
+      - "80:8080"
+      - "443:8443"
+    volumes:
+      - ./deploy/nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./deploy/nginx-reload-on-certificate-change.sh:/docker-entrypoint.d/40-reload-on-certificate-change.sh:ro
+      # The frontend image's own header and backend-location files, so both apply one policy.
+      - ./frontend/nginx-headers.conf:/etc/nginx/snippets/headers.conf:ro
+      - ./frontend/nginx-backend-locations.conf:/etc/nginx/snippets/backend-locations.conf:ro
+      - basic_auth:/etc/nginx/auth:ro
+      - tls:/etc/nginx/tls:ro
+      - acme_webroot:/var/www/certbot:ro
+    cap_drop:
+      - ALL
+    healthcheck:
+      # The plain-HTTP server's redirect; nothing on 443 answers without credentials.
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    depends_on:
+      basic-auth:
+        condition: service_completed_successfully
+      certbot:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+
+volumes:
+  mysql_data:
+  letsencrypt:
+  acme_webroot:
+  tls:
+  basic_auth:

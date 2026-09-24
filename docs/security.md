@@ -1,8 +1,8 @@
 # Security notes
 
-These are the controls the code actually implements, with their limits. The setup is a local
-take-home and is not presented as production-ready; where a real deployment must change something,
-the section says so.
+These are the controls the code actually implements, with their limits. They describe the local
+take-home stack; where a real deployment must change something, the section says so. The VPS
+deployment's own controls are in [Production deployment](#production-deployment).
 
 ## Secrets
 
@@ -81,8 +81,8 @@ Checked after validation and before anything is stored or sent (`backend/app/ser
   shown. That address is the validated input; Pydantic's `EmailStr` lower-cases its domain and
   keeps the local part as typed.
 - **Client IP.** NGINX overwrites `X-Forwarded-For` with the connecting address, so a client cannot
-  spoof it. Uvicorn trusts the header only because `compose.yaml` sets `FORWARDED_ALLOW_IPS=*` for
-  a backend whose port is never published. Locally, every browser arrives from the same Docker
+  spoof it. Uvicorn trusts the header only because both Compose files set `FORWARDED_ALLOW_IPS=*`
+  for a backend whose port is never published. Locally, every browser arrives from the same Docker
   gateway address, so the IP limit acts as one shared bucket.
 - The windows live in process memory: one limiter per application, built at startup and shared by
   every request. The image runs a single Uvicorn process (no `--workers`, no `--reload`), so the
@@ -169,6 +169,36 @@ log line of that request. A client-supplied id is used for correlation only.
   frontend processes run as non-root users with all capabilities dropped. The official MySQL image
   keeps its documented behaviour: its entrypoint starts as root, then runs `mysqld` as the `mysql`
   user.
+
+## Production deployment
+
+`docker-compose.prod.yml` with [deployment-vps.md](deployment-vps.md). On top of everything above:
+
+- **Exposure.** Only the edge NGINX has published ports, 80 and 443. MySQL, the backend and the
+  frontend have none, so a host firewall that Docker's iptables rules bypass has nothing to miss.
+- **TLS.** A Let's Encrypt certificate, issued and renewed by Certbot over the HTTP-01 challenge.
+  Port 80 serves only the challenge files and a redirect to HTTPS. HTTPS responses add HSTS.
+- **Basic Auth on every HTTPS path**, including the API, `/docs` and the admin panel, which keeps
+  its own login behind it. The credentials come only from the git-ignored `.env.prod`. At startup
+  a one-shot container without a network turns them into a bcrypt hash in a Docker volume, reading
+  the password from stdin, never printing either value. Startup is refused while a value is empty
+  or still `change-me`. NGINX's access log format leaves out the user name, and the
+  `Authorization` header is removed before a request reaches the frontend or the backend. NGINX's
+  error log keeps its standard record of failed attempts, which names the user name tried. Each
+  client address may send 5 requests a second (bursts of 40) before the credentials are checked,
+  which bounds both password guessing and the CPU spent on bcrypt.
+- **Admin panel.** `ADMIN_COOKIE_SECURE=true` is fixed, so the session cookie is `Secure` and the
+  backend refuses to start with the demo password or session secret. The path stays the published
+  default; Basic Auth and the login protect it, not the path. Its NGINX location keeps no access
+  log and only critical error-log entries, locally and at the edge, so no request line carrying
+  the path or an admin search is written.
+- **Containers.** The edge NGINX runs as the unprivileged `nginx` user with all capabilities
+  dropped. Certbot runs as root inside its own container, which has no published port and keeps
+  one capability, `CHOWN`, to hand NGINX a copy of the key. Every container has
+  `no-new-privileges` and rotated logs.
+- **Secrets in Compose output.** The values from `.env.prod` reach the containers as environment
+  variables, so `docker compose config` and `docker inspect` show them to anyone with Docker
+  access on the server, who is root-equivalent anyway. Treat that output like `.env.prod`.
 
 ## Email authentication and deliverability
 

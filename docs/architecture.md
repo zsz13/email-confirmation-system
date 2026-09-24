@@ -5,7 +5,8 @@
 | Component | Where | Role |
 |-----------|-------|------|
 | Angular app | `frontend/src/app/` | The form, the success view and the delivery-status polling |
-| NGINX | `frontend/nginx.conf` | Serves the production build; proxies `/api/`, `/openapi.json`, `/docs` and the admin path to the backend |
+| NGINX | `frontend/nginx.conf`, `frontend/nginx-backend-locations.conf` | Serves the production build; proxies `/api/`, `/openapi.json`, `/docs` and the admin path to the backend |
+| Edge NGINX (production) | `deploy/`, `docker-compose.prod.yml` | TLS, Basic Auth and Let's Encrypt in front of the same services; see [deployment-vps.md](deployment-vps.md) |
 | FastAPI app | `backend/app/main.py` | `create_app()`: settings, engine, rate limiters, middleware, routers, admin mount, lifespan |
 | API v1 | `backend/app/api/v1/` | `routes/health.py`, `routes/submissions.py` |
 | Email service | `backend/app/services/email.py` | Builds the text and HTML bodies, calls the Mailjet Send API v3.1 |
@@ -231,7 +232,9 @@ backend to be healthy.
   and the Docker socket is never mounted.
 - **NGINX.** It provides SPA fallback, immutable caching for hashed bundles, no caching for
   `index.html`, gzip, and security headers with a Content Security Policy. The admin location and
-  `/docs` have their own headers; overriding `ADMIN_PATH` means updating that location too.
+  `/docs` have their own headers; overriding `ADMIN_PATH` means updating that location too. Those
+  backend locations live in `frontend/nginx-backend-locations.conf`, which the production edge
+  proxy includes as well.
 - `compose.integration.yaml` is an overlay for the integration test only: it adds a Mailjet stub
   and points the backend at it.
 
@@ -240,8 +243,10 @@ backend to be healthy.
 ```
 .
 ├── Makefile, compose.yaml, compose.integration.yaml, .env.example
+├── docker-compose.prod.yml, .env.prod.example
+├── deploy/             production edge NGINX template, certbot and Basic Auth scripts
 ├── .github/            CI workflow, CODEOWNERS, Dependabot
-├── docs/               architecture, delivery status, testing, security
+├── docs/               architecture, delivery status, testing, security, VPS deployment
 ├── scripts/            integration-test.sh, e2e-real-email.sh, e2e-recipient.sh, mailjet_stub.py
 ├── backend/
 │   ├── Dockerfile, pyproject.toml, uv.lock, alembic.ini, alembic/, .env.example
@@ -255,6 +260,6 @@ backend to be healthy.
 │   │   └── services/          email, delivery_status, delivery_reconciler, rate_limit
 │   └── tests/
 └── frontend/
-    ├── Dockerfile, nginx.conf, nginx-headers.conf, package.json, pnpm-lock.yaml
+    ├── Dockerfile, nginx.conf, nginx-headers.conf, nginx-backend-locations.conf, package.json, pnpm-lock.yaml
     └── src/app/            app shell, core/ (API types, service, errors), features/submission/, shared/
 ```
