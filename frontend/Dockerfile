@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ---- Build stage: install from the lockfile and produce the Angular production build ----
-FROM node:24-trixie-slim AS builder
+FROM node:25-trixie-slim AS builder
 
 # Same pnpm version as the packageManager field in package.json.
 RUN npm install --global pnpm@12.3.4
