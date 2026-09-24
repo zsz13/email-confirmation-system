@@ -124,6 +124,22 @@ docker compose down              # stop and keep the data (-v deletes it)
 For hot reload with uv and pnpm (MySQL still in Docker), see
 [docs/testing.md](docs/testing.md#local-development).
 
+## Production deployment
+
+`docker-compose.prod.yml` runs the same images on one VPS at https://email.zsz13.com. An edge
+NGINX is the only published service (ports 80 and 443): it terminates TLS with a Let's Encrypt
+certificate that Certbot issues and renews, and puts the whole site behind HTTP Basic Auth.
+MySQL, the backend and the frontend are not published. Production credentials live only in the
+git-ignored `.env.prod`.
+
+```bash
+cp .env.prod.example .env.prod && chmod 600 .env.prod    # on the server; replace every change-me
+docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+```
+
+DNS, firewall, the first certificate, renewal, updates, logs and backups:
+[docs/deployment-vps.md](docs/deployment-vps.md).
+
 ## API endpoints
 
 All endpoints live under `/api/v1`; interactive docs at `/docs`. Error bodies are
@@ -183,9 +199,10 @@ State details, Mailjet mapping, the reconciler and the tracking UX:
 
 > **Demo-only access.** The path, credentials and session secret are committed on purpose so the
 > project can be reviewed without setup; they are public and must never be reused. The long path
-> adds only a small barrier; the login is the security boundary. Production overrides
-> `ADMIN_PATH`, `ADMIN_USERNAME`, `ADMIN_PASSWORD` and `ADMIN_SESSION_SECRET` and sets
-> `ADMIN_COOKIE_SECURE=true` behind HTTPS. The backend refuses that flag while demo secrets remain.
+> adds only a small barrier; the login is the security boundary. The production stack overrides
+> `ADMIN_USERNAME`, `ADMIN_PASSWORD` and `ADMIN_SESSION_SECRET`, sets `ADMIN_COOKIE_SECURE=true`
+> behind HTTPS and adds Basic Auth in front; it keeps the path. The backend refuses that flag while
+> demo secrets remain.
 
 The panel is read-only: a dashboard with summary counts, and a submissions table with search by
 name, email or UUIDv7 id, a status filter, sorting, pages of 25/50/100 and a details page. Create,
@@ -259,8 +276,8 @@ The reasoning behind each: [docs/architecture.md](docs/architecture.md#design-de
 - **Single process.** The reconciler and rate limiter assume one backend instance. Delivery is
   polled, since Mailjet webhooks need a public HTTPS endpoint.
 - **Tracking ids are identifiers, not credentials.** Holding one reveals that submission's status.
-- **Public demo admin.** The admin credentials and path are public by design, and the Compose
-  setup is local-only (no TLS, loopback ports).
+- **Public demo admin.** The admin credentials and path are public by design in the local stack
+  (no TLS, loopback ports). Production replaces the credentials but keeps the published path.
 - **Synchronous send.** The email is sent inside the request; a high-volume system would queue it.
   If MySQL fails right after Mailjet accepted, the row can stay `pending` (logged).
 - **No resend endpoint.** A `failed` row stays for inspection.

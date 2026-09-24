@@ -77,6 +77,25 @@ jobs:
           cp backend/.env.example backend/.env
       - run: docker compose config --quiet
       - run: docker compose -f compose.yaml -f compose.integration.yaml config --quiet
+      - run: docker compose -f docker-compose.prod.yml --env-file .env.prod.example config --quiet
+      # The edge proxy includes frontend/nginx-backend-locations.conf too, so a change that only the
+      # local stack exercises must still load there. A throwaway certificate and an empty
+      # htpasswd file stand in for the certbot and basic-auth volumes.
+      - name: Production edge NGINX configuration loads (nginx -t)
+        run: |
+          edge="$RUNNER_TEMP/edge"
+          mkdir -p "$edge/tls" "$edge/auth"
+          openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 1 \
+            -subj /CN=ci -keyout "$edge/tls/privkey.pem" -out "$edge/tls/fullchain.pem" 2>/dev/null
+          chmod 644 "$edge/tls/privkey.pem"
+          touch "$edge/auth/htpasswd"
+          image=$(docker compose -f docker-compose.prod.yml --env-file .env.prod.example config --format json | jq -r .services.nginx.image)
+          docker run --rm -e DOMAIN=email.zsz13.com \
+            -v "$PWD/deploy/nginx.conf.template:/etc/nginx/templates/default.conf.template:ro" \
+            -v "$PWD/frontend/nginx-headers.conf:/etc/nginx/snippets/headers.conf:ro" \
+            -v "$PWD/frontend/nginx-backend-locations.conf:/etc/nginx/snippets/backend-locations.conf:ro" \
+            -v "$edge/tls:/etc/nginx/tls:ro" -v "$edge/auth:/etc/nginx/auth:ro" \
+            "$image" nginx -t
       - run: docker compose build
       # Real images, real MySQL, real migrations; email goes to an in-network stub of the
       # Mailjet API (compose.integration.yaml), so no credential and no email is involved.

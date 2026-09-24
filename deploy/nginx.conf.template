@@ -1,0 +1,90 @@
+# Production edge proxy for docker-compose.prod.yml. The NGINX image renders this template at
+# start-up (envsubst fills in ${DOMAIN}) into /etc/nginx/conf.d/default.conf.
+#
+# The only published service. Port 80 answers the ACME HTTP-01 challenge and redirects the rest
+# to HTTPS; port 443 terminates TLS and requires HTTP Basic Auth for everything. The Angular
+# build comes from the frontend container; the API, the docs and the admin panel are proxied
+# straight to the backend through the same locations the frontend image uses. The container
+# listens on 8080 and 8443 because it runs as an unprivileged user; Compose publishes them on 80
+# and 443.
+
+# The "combined" format without $remote_user, so the Basic Auth user name is not written on
+# every request line.
+log_format edge '$remote_addr - [$time_local] "$request" $status $body_bytes_sent '
+                '"$http_referer" "$http_user_agent"';
+
+# Requests per client address on HTTPS, counted before Basic Auth is checked. Every request that
+# names the right user costs a bcrypt verification (about 90 ms of a worker), so without a limit
+# anyone who knows the user name could guess passwords, and stall the workers, at line speed.
+# The burst covers a page load: the admin panel fetches about a dozen files per page.
+limit_req_zone $binary_remote_addr zone=edge:10m rate=5r/s;
+
+server {
+    listen 8080;
+    server_name ${DOMAIN};
+    server_tokens off;
+    access_log /var/log/nginx/access.log edge;
+
+    # Challenge files written by the certbot service. No Basic Auth: Let's Encrypt must be able
+    # to fetch them. Nothing else is served over plain HTTP.
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        default_type text/plain;
+    }
+
+    location / {
+        return 301 https://${DOMAIN}$request_uri;
+    }
+
+    # The container health check (docker-compose.prod.yml): the same redirect, kept out of the
+    # access log, which would otherwise get a line every 10 seconds.
+    location = /healthz {
+        access_log off;
+        return 301 https://${DOMAIN}$request_uri;
+    }
+}
+
+server {
+    listen 8443 ssl;
+    http2 on;
+    server_name ${DOMAIN};
+    server_tokens off;
+    access_log /var/log/nginx/access.log edge;
+
+    # Published by the certbot service: a temporary self-signed pair until the first Let's
+    # Encrypt certificate exists, then that one. A running NGINX picks up every new pair through
+    # /docker-entrypoint.d/40-reload-on-certificate-change.sh.
+    ssl_certificate /etc/nginx/tls/fullchain.pem;
+    ssl_certificate_key /etc/nginx/tls/privkey.pem;
+
+    # Every location below requires the credentials from .env.prod, stored as a bcrypt hash by
+    # the basic-auth service. No location here may use `return`: it runs before the access
+    # phase and would answer without asking for credentials.
+    auth_basic "Email Confirmation System";
+    auth_basic_user_file /etc/nginx/auth/htpasswd;
+    limit_req zone=edge burst=40 nodelay;
+    limit_req_status 429;
+
+    # Docker's embedded DNS, re-queried so a recreated container is found again.
+    resolver 127.0.0.11 valid=10s ipv6=off;
+    set $backend "http://backend:8000";
+    set $frontend "http://frontend:8080";
+
+    # The frontend's default headers for what is answered here (the API, error pages), plus
+    # HSTS. HSTS covers the whole host once a browser has seen it, so /docs and the admin panel
+    # keep exactly the header sets they have in the frontend image.
+    include /etc/nginx/snippets/headers.conf;
+    add_header Strict-Transport-Security "max-age=31536000" always;
+
+    include /etc/nginx/snippets/backend-locations.conf;
+
+    # The Angular build. The frontend container sends the SPA's own headers and cache rules.
+    location / {
+        proxy_pass $frontend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        # Its access log would otherwise record the Basic Auth user name on every line.
+        proxy_set_header Authorization "";
+        add_header Strict-Transport-Security "max-age=31536000" always;
+    }
+}
