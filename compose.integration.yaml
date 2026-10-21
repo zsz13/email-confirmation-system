@@ -5,7 +5,7 @@
 
 services:
   mailjet-stub:
-    image: python:3.14-slim-trixie
+    image: python:3.15-slim-trixie
     command: ["python", "/opt/mailjet_stub.py"]
     volumes:
       - ./scripts/mailjet_stub.py:/opt/mailjet_stub.py:ro
