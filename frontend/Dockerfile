@@ -17,7 +17,7 @@ COPY . .
 RUN pnpm build
 
 # ---- Runtime stage: static files served by NGINX running as an unprivileged user ----
-FROM nginxinc/nginx-unprivileged:1.30 AS runtime
+FROM nginxinc/nginx-unprivileged:1.31 AS runtime
 
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY nginx-headers.conf /etc/nginx/snippets/headers.conf
